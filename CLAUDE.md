@@ -5,3 +5,4 @@ Rules for Claude Code to abide by:
 3. This repo is deployed via GitHub Pages, thus cannot contain unsupported logic (no server-side code/secrets required to render the site).
 4. This repo is public.
 5. Every build must render a build timestamp in the bottom-left corner of the viewport (currently `#build-stamp` in src/main.ts, populated from the `__BUILD_TIME__` constant injected at build time in vite.config.ts). This lets a deployment be visually confirmed by checking that the shown time updated after pushing. Keep it working until the user says it can be removed.
+6. This whole project must stay open source under a license that allows commercial use — MIT (see LICENSE, and the "license" field in package.json). Any dependency added must also be compatible with that (no GPL/AGPL or other copyleft/non-commercial licenses).
