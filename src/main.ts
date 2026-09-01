@@ -2,12 +2,19 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import './style.css';
 
-// Invert vertical orbit rotation (mouse-drag and two-finger touch both route
-// through this method) while leaving horizontal rotation untouched.
-const orbitControlsProto = OrbitControls.prototype as unknown as { _rotateUp: (angle: number) => void };
+// Invert both orbit axes (mouse-drag and two-finger touch both route through
+// these methods).
+const orbitControlsProto = OrbitControls.prototype as unknown as {
+  _rotateUp: (angle: number) => void;
+  _rotateLeft: (angle: number) => void;
+};
 const originalRotateUp = orbitControlsProto._rotateUp;
 orbitControlsProto._rotateUp = function (this: OrbitControls, angle: number) {
   originalRotateUp.call(this, -angle);
+};
+const originalRotateLeft = orbitControlsProto._rotateLeft;
+orbitControlsProto._rotateLeft = function (this: OrbitControls, angle: number) {
+  originalRotateLeft.call(this, -angle);
 };
 
 const viewport = document.querySelector<HTMLElement>('#viewport')!;
