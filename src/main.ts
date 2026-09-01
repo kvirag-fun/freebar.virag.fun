@@ -55,8 +55,7 @@ controls.touches = {
   ONE: THREE.TOUCH.PAN,
   TWO: THREE.TOUCH.DOLLY_ROTATE,
 };
-controls.enableDamping = true;
-controls.dampingFactor = 0.08;
+controls.enableDamping = false;
 controls.target.set(0, 1, 0);
 controls.update();
 
