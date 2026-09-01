@@ -354,7 +354,7 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     return { position: camera.position.clone(), quaternion: camera.quaternion.clone(), target: controls.target.clone() };
   }
 
-  return { camera, controls, resize, step, dispose, currentSeed };
+  return { container, camera, controls, resize, step, dispose, currentSeed };
 }
 
 type Pane = ReturnType<typeof createPane>;
@@ -363,21 +363,67 @@ const panes: Pane[] = [];
 function addPane(seed?: PaneSeed) {
   const container = document.createElement('div');
   container.className = 'pane';
+  container.style.flexGrow = '1';
   panesEl.appendChild(container);
   panes.push(createPane(container, seed));
 }
 
 addPane();
 
+// Draggable divider between the two panes, shown only in split view. Widths
+// are driven by flex-grow on each pane (resizer stays a fixed width), so a
+// drag just changes that ratio — a window resize alone doesn't need to touch it.
+let resizerEl: HTMLElement | null = null;
+
+function addResizer() {
+  resizerEl = document.createElement('div');
+  resizerEl.className = 'pane-resizer';
+  panesEl.insertBefore(resizerEl, panes[1].container);
+
+  let dragging = false;
+
+  function setRatioFromClientX(clientX: number) {
+    const rect = panesEl.getBoundingClientRect();
+    const ratio = THREE.MathUtils.clamp((clientX - rect.left) / rect.width, 0.15, 0.85);
+    panes[0].container.style.flexGrow = String(ratio);
+    panes[1].container.style.flexGrow = String(1 - ratio);
+    panes.forEach((pane) => pane.resize());
+  }
+
+  resizerEl.addEventListener('pointerdown', (event) => {
+    dragging = true;
+    resizerEl!.classList.add('dragging');
+    resizerEl!.setPointerCapture(event.pointerId);
+    document.body.style.userSelect = 'none';
+  });
+  resizerEl.addEventListener('pointermove', (event) => {
+    if (!dragging) return;
+    setRatioFromClientX(event.clientX);
+  });
+  resizerEl.addEventListener('pointerup', () => {
+    dragging = false;
+    resizerEl!.classList.remove('dragging');
+    document.body.style.userSelect = '';
+  });
+}
+
+function removeResizer() {
+  resizerEl?.remove();
+  resizerEl = null;
+}
+
 splitViewBtn.addEventListener('click', () => {
   if (panes.length === 1) {
     const seed = panes[0].currentSeed();
     addPane(seed);
+    addResizer();
     splitViewBtn.classList.add('active');
     splitViewBtn.querySelector('.tooltip')!.textContent = 'Single view';
     splitViewBtn.setAttribute('aria-label', 'Single view');
   } else {
+    removeResizer();
     panes.pop()!.dispose();
+    panes[0].container.style.flexGrow = '1';
     splitViewBtn.classList.remove('active');
     splitViewBtn.querySelector('.tooltip')!.textContent = 'Split view';
     splitViewBtn.setAttribute('aria-label', 'Split view');

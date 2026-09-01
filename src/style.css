@@ -53,8 +53,16 @@ html, body {
   overflow: hidden;
 }
 
-.pane + .pane {
-  border-left: 1px solid rgba(255, 255, 255, 0.15);
+.pane-resizer {
+  flex: 0 0 6px;
+  background: rgba(255, 255, 255, 0.15);
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.pane-resizer:hover,
+.pane-resizer.dragging {
+  background: rgba(255, 255, 255, 0.35);
 }
 
 .pane canvas {
