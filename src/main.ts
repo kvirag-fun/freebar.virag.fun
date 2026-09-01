@@ -79,19 +79,13 @@ const PIVOT_INDICATOR_SCALE = 0.035; // fraction of camera distance
 // Navigation cube: one labeled face per standard view. BoxGeometry's default
 // material-group order is [+X, -X, +Y, -Y, +Z, -Z], which is exactly the
 // order these labels and directions are listed in below.
-const NAV_CUBE_SIZE = 90; // px, corner overlay size
+const NAV_CUBE_SIZE = 180; // px, corner overlay size
 const NAV_LABELS = ['RIGHT', 'LEFT', 'TOP', 'BOTTOM', 'FRONT', 'BACK'];
-const NAV_TILT = THREE.MathUtils.degToRad(3); // see note by TOP/BOTTOM below
 const NAV_DIRECTIONS = [
   new THREE.Vector3(1, 0, 0),
   new THREE.Vector3(-1, 0, 0),
-  // TOP/BOTTOM are tilted a few degrees off true vertical rather than exactly
-  // (0, ±1, 0). A perfectly vertical view is exactly the pole condition our
-  // custom rotate rig clamps against (see the 180°-flip fix), so landing
-  // dead-on would leave the user unable to pitch away from it afterward.
-  // The tilt is visually indistinguishable from a true top/bottom view.
-  new THREE.Vector3(0, 1, 0).applyAxisAngle(new THREE.Vector3(1, 0, 0), NAV_TILT),
-  new THREE.Vector3(0, -1, 0).applyAxisAngle(new THREE.Vector3(1, 0, 0), NAV_TILT),
+  new THREE.Vector3(0, 1, 0),
+  new THREE.Vector3(0, -1, 0),
   new THREE.Vector3(0, 0, 1),
   new THREE.Vector3(0, 0, -1),
 ];
@@ -238,7 +232,7 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     if (!navCubeVisible) return null;
     const rect = renderer.domElement.getBoundingClientRect();
     const offsetX = rect.left + container.clientWidth - NAV_CUBE_SIZE - 8;
-    const offsetY = rect.top + 8;
+    const offsetY = rect.top + container.clientHeight - NAV_CUBE_SIZE - 8;
     const localX = clientX - offsetX;
     const localY = clientY - offsetY;
     if (localX < 0 || localX > NAV_CUBE_SIZE || localY < 0 || localY > NAV_CUBE_SIZE) return null;
@@ -254,7 +248,7 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     renderer.getViewport(navViewport);
     renderer.clearDepth();
     const x = container.clientWidth - NAV_CUBE_SIZE - 8;
-    const y = container.clientHeight - NAV_CUBE_SIZE - 8; // viewport y is measured bottom-up
+    const y = 8; // viewport y is measured bottom-up, so a small value sits near the bottom
     renderer.setViewport(x, y, NAV_CUBE_SIZE, NAV_CUBE_SIZE);
     renderer.render(navScene, navCamera);
     renderer.setViewport(navViewport.x, navViewport.y, navViewport.z, navViewport.w);
@@ -349,10 +343,25 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     // which is what caused a 180° snap when rotating all the way to the top
     // or bottom. So: reject the pitch component for this step if it would
     // cross too close to either pole; the yaw component still applies.
+    // The nav cube can snap the camera to land exactly at a pole (see
+    // snapToView), which starts a subsequent drag already inside — or right
+    // at the edge of — the rejection zone above. A single frame's pitch is
+    // usually a couple of degrees, smaller than that zone, so a plain
+    // reject-if-still-too-close rule would never let a step through and the
+    // view would get stuck unable to pitch away at all. So: once already at
+    // or past a boundary, pitch is always allowed through (each step then
+    // moves further from the pole, escaping within a frame or two); the
+    // reject rule only guards the normal case of approaching the boundary
+    // from a safe position.
+    const currentForward = new THREE.Vector3();
+    camera.getWorldDirection(currentForward);
+    const currentAngleToUp = currentForward.angleTo(WORLD_UP);
+    const startedAtPole = currentAngleToUp <= POLE_EPS || currentAngleToUp >= Math.PI - POLE_EPS;
+
     const qYawPitch = qYaw.clone().multiply(qPitch);
     const tentativeForward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion.clone().premultiply(qYawPitch));
     const angleToUp = tentativeForward.angleTo(WORLD_UP);
-    const pitchAllowed = angleToUp > POLE_EPS && angleToUp < Math.PI - POLE_EPS;
+    const pitchAllowed = startedAtPole || (angleToUp > POLE_EPS && angleToUp < Math.PI - POLE_EPS);
     const qDelta = pitchAllowed ? qYawPitch : qYaw;
 
     const offset = camera.position.clone().sub(orbit.pivot).applyQuaternion(qDelta);
