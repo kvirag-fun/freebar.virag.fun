@@ -84,10 +84,16 @@ controls.touches = {
   TWO: THREE.TOUCH.DOLLY_ROTATE,
 };
 controls.enableDamping = false;
+controls.rotateSpeed = 0.5;
 controls.minDistance = 0.5;
 controls.maxDistance = 50;
 controls.target.set(0, 1, 0);
 controls.update();
+
+function contentBoundsCenter(): THREE.Vector3 | null {
+  const box3 = new THREE.Box3().setFromObject(content);
+  return box3.isEmpty() ? null : box3.getCenter(new THREE.Vector3());
+}
 
 // Double-click/double-tap: zoom to fit the bounding box of all content.
 type Tween = { fromPos: THREE.Vector3; toPos: THREE.Vector3; fromTarget: THREE.Vector3; toTarget: THREE.Vector3; start: number };
@@ -96,10 +102,10 @@ const TWEEN_MS = 400;
 const FIT_PADDING = 1.2;
 
 function zoomToFit() {
-  const box3 = new THREE.Box3().setFromObject(content);
-  if (box3.isEmpty()) return;
+  const center = contentBoundsCenter();
+  if (!center) return;
 
-  const center = box3.getCenter(new THREE.Vector3());
+  const box3 = new THREE.Box3().setFromObject(content);
   const sphere = box3.getBoundingSphere(new THREE.Sphere());
   const radius = Math.max(sphere.radius, 0.001);
 
@@ -136,6 +142,41 @@ renderer.domElement.addEventListener('touchend', (event) => {
   } else {
     lastTap = { time: now, x: touch.clientX, y: touch.clientY };
   }
+});
+
+// Rotation pivot: at the moment a rotate gesture begins (right-mouse-down, or
+// the second finger landing for two-finger touch-rotate), re-center the orbit
+// target on whatever point is under the cursor — where the line from the
+// camera through the cursor first hits actual content — or on the bounding-
+// box center of all content if that ray hits nothing. Because OrbitControls
+// recomputes its camera offset from (position, target) fresh every frame,
+// changing target here doesn't move the camera; it only changes what the
+// upcoming drag orbits around.
+const raycaster = new THREE.Raycaster();
+
+function setPivot(clientX: number, clientY: number) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  const ndc = new THREE.Vector2(
+    ((clientX - rect.left) / rect.width) * 2 - 1,
+    -((clientY - rect.top) / rect.height) * 2 + 1,
+  );
+  raycaster.setFromCamera(ndc, camera);
+
+  const hit = raycaster.intersectObject(content, true)[0];
+  const pivot = hit ? hit.point : contentBoundsCenter();
+  if (pivot) controls.target.copy(pivot);
+}
+
+renderer.domElement.addEventListener('pointerdown', (event) => {
+  tween = null; // a fresh user gesture always wins over an in-flight zoom-to-fit
+  if (event.button === 2) setPivot(event.clientX, event.clientY);
+});
+
+renderer.domElement.addEventListener('touchstart', (event) => {
+  tween = null;
+  if (event.touches.length !== 2) return;
+  const [t1, t2] = event.touches;
+  setPivot((t1.clientX + t2.clientX) / 2, (t1.clientY + t2.clientY) / 2);
 });
 
 function easeOutCubic(t: number) {
