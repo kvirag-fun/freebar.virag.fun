@@ -27,18 +27,88 @@ html, body {
   background: var(--bar-background);
 }
 
+#app-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 10px;
+}
+
 #viewport {
   position: relative;
   flex: 1 1 auto;
   overflow: hidden;
 }
 
-#viewport canvas {
+#panes {
+  display: flex;
+  width: 100%;
+  height: 100%;
+}
+
+.pane {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.pane + .pane {
+  border-left: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.pane canvas {
   position: absolute;
   inset: 0;
   display: block;
   touch-action: none;
   cursor: crosshair;
+}
+
+#split-view-btn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #3a3733;
+  cursor: pointer;
+}
+
+#split-view-btn:hover,
+#split-view-btn:focus-visible {
+  background: rgba(0, 0, 0, 0.08);
+}
+
+#split-view-btn.active {
+  background: rgba(0, 0, 0, 0.12);
+}
+
+#split-view-btn .tooltip {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: #2a2a28;
+  color: #f5f2ec;
+  font: 12px/1.4 sans-serif;
+  white-space: nowrap;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  pointer-events: none;
+}
+
+#split-view-btn:hover .tooltip,
+#split-view-btn:focus-visible .tooltip {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 #build-stamp {

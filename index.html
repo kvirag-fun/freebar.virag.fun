@@ -9,8 +9,18 @@
   <body>
     <div id="app">
       <header id="app-header"></header>
-      <main id="viewport"></main>
-      <footer id="app-footer"></footer>
+      <main id="viewport">
+        <div id="panes"></div>
+      </main>
+      <footer id="app-footer">
+        <button id="split-view-btn" type="button" aria-label="Split view" title="Split view">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="4" width="18" height="16" rx="2" />
+            <line x1="12" y1="4" x2="12" y2="20" />
+          </svg>
+          <span class="tooltip">Split view</span>
+        </button>
+      </footer>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
