@@ -2,6 +2,14 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import './style.css';
 
+// Invert vertical orbit rotation (mouse-drag and two-finger touch both route
+// through this method) while leaving horizontal rotation untouched.
+const orbitControlsProto = OrbitControls.prototype as unknown as { _rotateUp: (angle: number) => void };
+const originalRotateUp = orbitControlsProto._rotateUp;
+orbitControlsProto._rotateUp = function (this: OrbitControls, angle: number) {
+  originalRotateUp.call(this, -angle);
+};
+
 const app = document.querySelector<HTMLDivElement>('#app')!;
 
 const scene = new THREE.Scene();
@@ -33,6 +41,11 @@ scene.add(grid);
 // Axes helper: red = X, green = Y, blue = Z
 scene.add(new THREE.AxesHelper(3));
 
+// Actual scene content (as opposed to helpers like the grid/axes above) lives
+// in this group, so "zoom to fit" can frame it without including the grid.
+const content = new THREE.Group();
+scene.add(content);
+
 // Placeholder bar/box with distinct X/Y/Z dimensions so orientation is unambiguous:
 // width (X) = 1, height (Y) = 2, depth (Z) = 3
 const box = new THREE.Mesh(
@@ -40,7 +53,7 @@ const box = new THREE.Mesh(
   new THREE.MeshStandardMaterial({ color: 0x4a9eff, metalness: 0.1, roughness: 0.6 }),
 );
 box.position.y = 1; // sit on top of the grid
-scene.add(box);
+content.add(box);
 
 // Camera controls: left = none (reserved for future selection/manipulation),
 // middle = pan, right = rotate, wheel = zoom.
@@ -61,54 +74,38 @@ controls.maxDistance = 50;
 controls.target.set(0, 1, 0);
 controls.update();
 
-// Double-click/double-tap: zoom in on whatever point is under the cursor and
-// re-center the orbit pivot there, like map-style double-click zoom.
-const raycaster = new THREE.Raycaster();
-const pointer = new THREE.Vector2();
-const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-
+// Double-click/double-tap: zoom to fit the bounding box of all content.
 type Tween = { fromPos: THREE.Vector3; toPos: THREE.Vector3; fromTarget: THREE.Vector3; toTarget: THREE.Vector3; start: number };
 let tween: Tween | null = null;
-const TWEEN_MS = 350;
-const ZOOM_FACTOR = 0.5; // halve the distance to the clicked point each time
+const TWEEN_MS = 400;
+const FIT_PADDING = 1.2;
 
-function pointerToNdc(clientX: number, clientY: number) {
-  const rect = renderer.domElement.getBoundingClientRect();
-  pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
-  pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
-}
+function zoomToFit() {
+  const box3 = new THREE.Box3().setFromObject(content);
+  if (box3.isEmpty()) return;
 
-function pickPoint(clientX: number, clientY: number): THREE.Vector3 | null {
-  pointerToNdc(clientX, clientY);
-  raycaster.setFromCamera(pointer, camera);
+  const center = box3.getCenter(new THREE.Vector3());
+  const sphere = box3.getBoundingSphere(new THREE.Sphere());
+  const radius = Math.max(sphere.radius, 0.001);
 
-  const hit = raycaster.intersectObject(box)[0];
-  if (hit) return hit.point;
+  const vFov = THREE.MathUtils.degToRad(camera.fov);
+  const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
+  const distance = (radius / Math.sin(Math.min(vFov, hFov) / 2)) * FIT_PADDING;
 
-  const groundHit = new THREE.Vector3();
-  return raycaster.ray.intersectPlane(groundPlane, groundHit);
-}
-
-function zoomToPoint(clientX: number, clientY: number) {
-  const point = pickPoint(clientX, clientY);
-  if (!point) return;
-
-  const offset = camera.position.clone().sub(point);
-  const newDistance = Math.max(controls.minDistance, offset.length() * ZOOM_FACTOR);
-  const toPos = point.clone().add(offset.normalize().multiplyScalar(newDistance));
+  const direction = camera.position.clone().sub(controls.target);
+  if (direction.lengthSq() < 1e-6) direction.set(0, 0, 1);
+  direction.normalize();
 
   tween = {
     fromPos: camera.position.clone(),
-    toPos,
+    toPos: center.clone().add(direction.multiplyScalar(distance)),
     fromTarget: controls.target.clone(),
-    toTarget: point.clone(),
+    toTarget: center.clone(),
     start: performance.now(),
   };
 }
 
-renderer.domElement.addEventListener('dblclick', (event) => {
-  zoomToPoint(event.clientX, event.clientY);
-});
+renderer.domElement.addEventListener('dblclick', () => zoomToFit());
 
 // Mobile: synthesize double-tap since dblclick from touch is unreliable.
 let lastTap = { time: 0, x: 0, y: 0 };
@@ -119,7 +116,7 @@ renderer.domElement.addEventListener('touchend', (event) => {
   const dx = touch.clientX - lastTap.x;
   const dy = touch.clientY - lastTap.y;
   if (now - lastTap.time < 300 && Math.hypot(dx, dy) < 30) {
-    zoomToPoint(touch.clientX, touch.clientY);
+    zoomToFit();
     lastTap = { time: 0, x: 0, y: 0 };
   } else {
     lastTap = { time: now, x: touch.clientX, y: touch.clientY };
