@@ -259,7 +259,7 @@ function endOrbit() {
 // right-drag/two-finger-drag is rotating.
 function setCursor(mode: 'idle' | 'pan' | 'rotate') {
   if (mode === 'pan') renderer.domElement.style.cursor = "url('/cursor-pan.svg') 14 14, move";
-  else if (mode === 'rotate') renderer.domElement.style.cursor = "url('/cursor-rotate.svg') 14 14, grab";
+  else if (mode === 'rotate') renderer.domElement.style.cursor = "url('/cursor-rotate.svg') 16 16, grab";
   else renderer.domElement.style.cursor = '';
 }
 
