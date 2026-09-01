@@ -5,6 +5,10 @@ import './style.css';
 const viewport = document.querySelector<HTMLElement>('#viewport')!;
 const panesEl = document.querySelector<HTMLElement>('#panes')!;
 const splitViewBtn = document.querySelector<HTMLButtonElement>('#split-view-btn')!;
+const navCubeBtn = document.querySelector<HTMLButtonElement>('#nav-cube-btn')!;
+
+// Shared across every pane, so one button hides/shows the cube everywhere at once.
+let navCubeVisible = true;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1a1a1a);
@@ -72,6 +76,47 @@ const TWEEN_MS = 400;
 const FIT_PADDING = 1.2;
 const PIVOT_INDICATOR_SCALE = 0.035; // fraction of camera distance
 
+// Navigation cube: one labeled face per standard view. BoxGeometry's default
+// material-group order is [+X, -X, +Y, -Y, +Z, -Z], which is exactly the
+// order these labels and directions are listed in below.
+const NAV_CUBE_SIZE = 90; // px, corner overlay size
+const NAV_LABELS = ['RIGHT', 'LEFT', 'TOP', 'BOTTOM', 'FRONT', 'BACK'];
+const NAV_TILT = THREE.MathUtils.degToRad(3); // see note by TOP/BOTTOM below
+const NAV_DIRECTIONS = [
+  new THREE.Vector3(1, 0, 0),
+  new THREE.Vector3(-1, 0, 0),
+  // TOP/BOTTOM are tilted a few degrees off true vertical rather than exactly
+  // (0, ±1, 0). A perfectly vertical view is exactly the pole condition our
+  // custom rotate rig clamps against (see the 180°-flip fix), so landing
+  // dead-on would leave the user unable to pitch away from it afterward.
+  // The tilt is visually indistinguishable from a true top/bottom view.
+  new THREE.Vector3(0, 1, 0).applyAxisAngle(new THREE.Vector3(1, 0, 0), NAV_TILT),
+  new THREE.Vector3(0, -1, 0).applyAxisAngle(new THREE.Vector3(1, 0, 0), NAV_TILT),
+  new THREE.Vector3(0, 0, 1),
+  new THREE.Vector3(0, 0, -1),
+];
+
+function makeNavFaceTexture(label: string): THREE.CanvasTexture {
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = '#3a3a3a';
+  ctx.fillRect(0, 0, size, size);
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
+  ctx.lineWidth = 4;
+  ctx.strokeRect(2, 2, size - 4, size - 4);
+  ctx.fillStyle = '#e8e6e0';
+  ctx.font = 'bold 20px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, size / 2, size / 2);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
 type Tween = { fromPos: THREE.Vector3; toPos: THREE.Vector3; fromTarget: THREE.Vector3; toTarget: THREE.Vector3; start: number };
 
 type PaneSeed = { position: THREE.Vector3; quaternion: THREE.Quaternion; target: THREE.Vector3 };
@@ -90,6 +135,11 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setSize(container.clientWidth, container.clientHeight);
   renderer.setPixelRatio(window.devicePixelRatio);
+  // The nav cube is a second render() call into a corner viewport; render()
+  // auto-clears the whole canvas by default regardless of viewport, which
+  // would wipe out the main scene's just-drawn pixels everywhere else. So
+  // clearing is done manually, once, at the start of each frame instead.
+  renderer.autoClear = false;
   container.appendChild(renderer.domElement);
 
   // Camera controls: left = none (reserved for future selection/manipulation),
@@ -145,6 +195,69 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
       toTarget: center.clone(),
       start: performance.now(),
     };
+  }
+
+  // Navigation cube: a small labeled-face overlay in this pane's corner —
+  // one per pane, each tied to that pane's own camera. Clicking a face snaps
+  // the camera to that standard view, preserving the current pivot and
+  // distance, tweened the same way as zoom-to-fit (only camera.position
+  // moves; controls.target stays fixed, so OrbitControls' own lookAt()
+  // derives the correct orientation each frame with no extra work).
+  const navMaterials = NAV_LABELS.map((label, index) => {
+    const map = makeNavFaceTexture(label);
+    // BoxGeometry's default UV layout renders the -Y (BOTTOM, index 3) face's
+    // texture upside down relative to the others; rotate it back upright.
+    if (index === 3) {
+      map.center.set(0.5, 0.5);
+      map.rotation = Math.PI;
+    }
+    return new THREE.MeshBasicMaterial({ map });
+  });
+  const navCube = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.4, 1.4), navMaterials);
+  const navScene = new THREE.Group();
+  navScene.add(navCube);
+  const navCamera = new THREE.OrthographicCamera(-1.6, 1.6, 1.6, -1.6, 0.1, 10);
+  navCamera.position.set(0, 0, 4);
+  navCamera.lookAt(0, 0, 0);
+  const navViewport = new THREE.Vector4();
+
+  function snapToView(materialIndex: number) {
+    const dir = NAV_DIRECTIONS[materialIndex];
+    if (!dir) return;
+    const distance = camera.position.distanceTo(controls.target);
+    tween = {
+      fromPos: camera.position.clone(),
+      toPos: controls.target.clone().add(dir.clone().multiplyScalar(distance)),
+      fromTarget: controls.target.clone(),
+      toTarget: controls.target.clone(),
+      start: performance.now(),
+    };
+  }
+
+  function hitTestNavCube(clientX: number, clientY: number): number | null {
+    if (!navCubeVisible) return null;
+    const rect = renderer.domElement.getBoundingClientRect();
+    const offsetX = rect.left + container.clientWidth - NAV_CUBE_SIZE - 8;
+    const offsetY = rect.top + 8;
+    const localX = clientX - offsetX;
+    const localY = clientY - offsetY;
+    if (localX < 0 || localX > NAV_CUBE_SIZE || localY < 0 || localY > NAV_CUBE_SIZE) return null;
+    const ndc = new THREE.Vector2((localX / NAV_CUBE_SIZE) * 2 - 1, -(localY / NAV_CUBE_SIZE) * 2 + 1);
+    raycaster.setFromCamera(ndc, navCamera);
+    const hit = raycaster.intersectObject(navCube)[0];
+    return hit?.face ? hit.face.materialIndex : null;
+  }
+
+  function renderNavCube() {
+    if (!navCubeVisible) return;
+    navCube.quaternion.copy(camera.quaternion).invert();
+    renderer.getViewport(navViewport);
+    renderer.clearDepth();
+    const x = container.clientWidth - NAV_CUBE_SIZE - 8;
+    const y = container.clientHeight - NAV_CUBE_SIZE - 8; // viewport y is measured bottom-up
+    renderer.setViewport(x, y, NAV_CUBE_SIZE, NAV_CUBE_SIZE);
+    renderer.render(navScene, navCamera);
+    renderer.setViewport(navViewport.x, navViewport.y, navViewport.z, navViewport.w);
   }
 
   // Double-middle-click zooms to fit (native dblclick only fires for the left
@@ -270,6 +383,8 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   // Pointer events unify mouse/touch/pen, but two-finger touch rotation is
   // handled separately below (it needs the midpoint of both fingers, not a
   // single pointer's position) — so these only ever act on the mouse.
+  let isPanning = false;
+
   renderer.domElement.addEventListener('pointerdown', (event) => {
     if (event.pointerType !== 'mouse') return;
     if (event.button === 2) {
@@ -277,18 +392,24 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
       renderer.domElement.setPointerCapture(event.pointerId);
       beginOrbit(event.clientX, event.clientY);
     } else if (event.button === 1) {
+      isPanning = true;
       setCursor('pan');
     }
   });
   renderer.domElement.addEventListener('pointermove', (event) => {
     if (event.pointerType !== 'mouse') return;
     stepOrbit(event.clientX, event.clientY);
+    if (!orbit.active && !isPanning) {
+      const hovering = hitTestNavCube(event.clientX, event.clientY) !== null;
+      renderer.domElement.style.cursor = hovering ? 'pointer' : '';
+    }
   });
   renderer.domElement.addEventListener('pointerup', (event) => {
     if (event.pointerType !== 'mouse') return;
     if (event.button === 2) {
       endOrbit();
     } else if (event.button === 1) {
+      isPanning = false;
       setCursor('idle');
       const now = performance.now();
       const dx = event.clientX - lastMiddleClick.x;
@@ -299,6 +420,9 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
       } else {
         lastMiddleClick = { time: now, x: event.clientX, y: event.clientY };
       }
+    } else if (event.button === 0) {
+      const materialIndex = hitTestNavCube(event.clientX, event.clientY);
+      if (materialIndex !== null) snapToView(materialIndex);
     }
   });
 
@@ -340,13 +464,20 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     }
 
     controls.update();
+    renderer.clear();
     renderer.render(scene, camera);
+    renderNavCube();
   }
 
   function dispose() {
     controls.dispose();
     renderer.dispose();
     scene.remove(pivotIndicator);
+    navMaterials.forEach((material) => {
+      material.map?.dispose();
+      material.dispose();
+    });
+    navCube.geometry.dispose();
     container.remove();
   }
 
@@ -354,7 +485,7 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     return { position: camera.position.clone(), quaternion: camera.quaternion.clone(), target: controls.target.clone() };
   }
 
-  return { container, camera, controls, resize, step, dispose, currentSeed };
+  return { container, camera, controls, resize, step, dispose, currentSeed, snapToView };
 }
 
 type Pane = ReturnType<typeof createPane>;
@@ -429,6 +560,14 @@ splitViewBtn.addEventListener('click', () => {
     splitViewBtn.setAttribute('aria-label', 'Split view');
   }
   panes.forEach((pane) => pane.resize());
+});
+
+navCubeBtn.addEventListener('click', () => {
+  navCubeVisible = !navCubeVisible;
+  navCubeBtn.classList.toggle('active', navCubeVisible);
+  const label = navCubeVisible ? 'Hide navigation cube' : 'Show navigation cube';
+  navCubeBtn.querySelector('.tooltip')!.textContent = label;
+  navCubeBtn.setAttribute('aria-label', label);
 });
 
 window.addEventListener('resize', () => {

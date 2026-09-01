@@ -31,6 +31,7 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  gap: 4px;
   padding: 0 10px;
 }
 
@@ -73,7 +74,7 @@ html, body {
   cursor: crosshair;
 }
 
-#split-view-btn {
+.icon-btn {
   position: relative;
   display: flex;
   align-items: center;
@@ -88,16 +89,16 @@ html, body {
   cursor: pointer;
 }
 
-#split-view-btn:hover,
-#split-view-btn:focus-visible {
+.icon-btn:hover,
+.icon-btn:focus-visible {
   background: rgba(0, 0, 0, 0.08);
 }
 
-#split-view-btn.active {
+.icon-btn.active {
   background: rgba(0, 0, 0, 0.12);
 }
 
-#split-view-btn .tooltip {
+.icon-btn .tooltip {
   position: absolute;
   bottom: calc(100% + 8px);
   right: 0;
@@ -113,8 +114,8 @@ html, body {
   pointer-events: none;
 }
 
-#split-view-btn:hover .tooltip,
-#split-view-btn:focus-visible .tooltip {
+.icon-btn:hover .tooltip,
+.icon-btn:focus-visible .tooltip {
   opacity: 1;
   transform: translateY(0);
 }
