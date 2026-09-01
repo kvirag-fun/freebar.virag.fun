@@ -6,12 +6,46 @@ html, body {
   background: #1a1a1a;
 }
 
+/* Warm paper-white used by the cv.virag.fun header/footer bars, hardcoded
+   here since freebar is a fully independent repo (see CLAUDE.md). */
+:root {
+  --bar-background: oklch(0.972 0.007 92);
+  --bar-height: 48px;
+}
+
 #app {
+  display: flex;
+  flex-direction: column;
   width: 100vw;
   height: 100vh;
 }
 
-canvas {
+#app-header,
+#app-footer {
+  flex: 0 0 auto;
+  height: var(--bar-height);
+  background: var(--bar-background);
+}
+
+#viewport {
+  position: relative;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+#viewport canvas {
+  position: absolute;
+  inset: 0;
   display: block;
   touch-action: none;
+}
+
+#build-stamp {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  font: 11px/1.4 monospace;
+  color: rgba(255, 255, 255, 0.5);
+  pointer-events: none;
+  user-select: none;
 }

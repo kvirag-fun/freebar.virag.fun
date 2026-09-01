@@ -10,23 +10,31 @@ orbitControlsProto._rotateUp = function (this: OrbitControls, angle: number) {
   originalRotateUp.call(this, -angle);
 };
 
-const app = document.querySelector<HTMLDivElement>('#app')!;
+const viewport = document.querySelector<HTMLElement>('#viewport')!;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1a1a1a);
 
 const camera = new THREE.PerspectiveCamera(
   50,
-  window.innerWidth / window.innerHeight,
+  viewport.clientWidth / viewport.clientHeight,
   0.1,
   1000,
 );
 camera.position.set(4, 3, 5);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setSize(viewport.clientWidth, viewport.clientHeight);
 renderer.setPixelRatio(window.devicePixelRatio);
-app.appendChild(renderer.domElement);
+viewport.appendChild(renderer.domElement);
+
+// Build-time stamp so a redeploy can be confirmed by eye: this should change
+// on every commit once the workflow rebuilds. Remove once real UI (header/
+// footer controls) makes a version indicator redundant.
+const buildStamp = document.createElement('div');
+buildStamp.id = 'build-stamp';
+buildStamp.textContent = `build ${new Date(__BUILD_TIME__).toLocaleString()}`;
+viewport.appendChild(buildStamp);
 
 // Lighting
 scene.add(new THREE.AmbientLight(0xffffff, 0.6));
@@ -128,9 +136,9 @@ function easeOutCubic(t: number) {
 }
 
 window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.aspect = viewport.clientWidth / viewport.clientHeight;
   camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setSize(viewport.clientWidth, viewport.clientHeight);
 });
 
 function animate() {
