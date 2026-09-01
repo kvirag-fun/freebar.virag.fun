@@ -2,21 +2,6 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import './style.css';
 
-// Invert both orbit axes (mouse-drag and two-finger touch both route through
-// these methods).
-const orbitControlsProto = OrbitControls.prototype as unknown as {
-  _rotateUp: (angle: number) => void;
-  _rotateLeft: (angle: number) => void;
-};
-const originalRotateUp = orbitControlsProto._rotateUp;
-orbitControlsProto._rotateUp = function (this: OrbitControls, angle: number) {
-  originalRotateUp.call(this, -angle);
-};
-const originalRotateLeft = orbitControlsProto._rotateLeft;
-orbitControlsProto._rotateLeft = function (this: OrbitControls, angle: number) {
-  originalRotateLeft.call(this, -angle);
-};
-
 const viewport = document.querySelector<HTMLElement>('#viewport')!;
 
 const scene = new THREE.Scene();
@@ -71,20 +56,23 @@ box.position.y = 1; // sit on top of the grid
 content.add(box);
 
 // Camera controls: left = none (reserved for future selection/manipulation),
-// middle = pan, right = rotate, wheel = zoom.
-// Touch: one finger = pan, two fingers = pinch-to-zoom + two-finger-drag-to-rotate.
+// middle = pan, right = rotate (handled entirely by our own code below, see
+// "Custom rotation" — enableRotate is off so OrbitControls never touches it),
+// wheel = zoom.
+// Touch: one finger = pan, two fingers = pinch-to-zoom (still OrbitControls,
+// via enableZoom) + two-finger-drag-to-rotate (also custom, below).
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.mouseButtons = {
   LEFT: null,
   MIDDLE: THREE.MOUSE.PAN,
-  RIGHT: THREE.MOUSE.ROTATE,
+  RIGHT: null,
 };
 controls.touches = {
   ONE: THREE.TOUCH.PAN,
   TWO: THREE.TOUCH.DOLLY_ROTATE,
 };
+controls.enableRotate = false;
 controls.enableDamping = false;
-controls.rotateSpeed = 0.5;
 controls.minDistance = 0.5;
 controls.maxDistance = 50;
 controls.target.set(0, 1, 0);
@@ -144,17 +132,26 @@ renderer.domElement.addEventListener('touchend', (event) => {
   }
 });
 
-// Rotation pivot: at the moment a rotate gesture begins (right-mouse-down, or
-// the second finger landing for two-finger touch-rotate), re-center the orbit
-// target on whatever point is under the cursor — where the line from the
-// camera through the cursor first hits actual content — or on the bounding-
-// box center of all content if that ray hits nothing. Because OrbitControls
-// recomputes its camera offset from (position, target) fresh every frame,
-// changing target here doesn't move the camera; it only changes what the
-// upcoming drag orbits around.
+// Custom rotation: orbiting a point that isn't dead-center of the view is
+// fundamentally incompatible with OrbitControls, which always forces
+// `camera.lookAt(target)` — the instant `target` becomes an off-center point,
+// that lookAt snaps the view to recenter on it. So rotation is implemented
+// here instead: at gesture start, pick a pivot (raycast into `content`, or
+// the content bounding-box center if nothing's hit), then on every move,
+// rotate the camera's position *and* orientation together, rigidly, around
+// that pivot. Since both move by the same incremental rotation, the pivot
+// point stays visually fixed wherever it was on screen when the drag began —
+// everything else swings around it — instead of snapping to center.
+//
+// controls.target is kept re-projected onto the camera's new forward axis
+// (at whatever distance it already was) after every step, purely so
+// OrbitControls' own pan/zoom stay internally consistent (it always assumes
+// target sits dead ahead) and don't jump the next time they're used.
 const raycaster = new THREE.Raycaster();
+const WORLD_UP = new THREE.Vector3(0, 1, 0);
+const ROTATE_SPEED = 0.5;
 
-function setPivot(clientX: number, clientY: number) {
+function pickPivot(clientX: number, clientY: number): THREE.Vector3 {
   const rect = renderer.domElement.getBoundingClientRect();
   const ndc = new THREE.Vector2(
     ((clientX - rect.left) / rect.width) * 2 - 1,
@@ -163,21 +160,85 @@ function setPivot(clientX: number, clientY: number) {
   raycaster.setFromCamera(ndc, camera);
 
   const hit = raycaster.intersectObject(content, true)[0];
-  const pivot = hit ? hit.point : contentBoundsCenter();
-  if (pivot) controls.target.copy(pivot);
+  return hit ? hit.point.clone() : (contentBoundsCenter() ?? controls.target.clone());
 }
 
-renderer.domElement.addEventListener('pointerdown', (event) => {
+const orbit = { active: false, pivot: new THREE.Vector3(), lastX: 0, lastY: 0 };
+
+function beginOrbit(clientX: number, clientY: number) {
   tween = null; // a fresh user gesture always wins over an in-flight zoom-to-fit
-  if (event.button === 2) setPivot(event.clientX, event.clientY);
+  orbit.active = true;
+  orbit.pivot.copy(pickPivot(clientX, clientY));
+  orbit.lastX = clientX;
+  orbit.lastY = clientY;
+}
+
+function stepOrbit(clientX: number, clientY: number) {
+  if (!orbit.active) return;
+  const dx = clientX - orbit.lastX;
+  const dy = clientY - orbit.lastY;
+  orbit.lastX = clientX;
+  orbit.lastY = clientY;
+  if (dx === 0 && dy === 0) return;
+
+  const distanceToTarget = camera.position.distanceTo(controls.target);
+
+  const h = viewport.clientHeight;
+  const deltaTheta = ((2 * Math.PI * dx) / h) * ROTATE_SPEED;
+  const deltaPhi = ((2 * Math.PI * dy) / h) * ROTATE_SPEED;
+
+  const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0).normalize();
+  const qDelta = new THREE.Quaternion()
+    .setFromAxisAngle(WORLD_UP, deltaTheta)
+    .multiply(new THREE.Quaternion().setFromAxisAngle(right, deltaPhi));
+
+  const offset = camera.position.clone().sub(orbit.pivot).applyQuaternion(qDelta);
+  camera.position.copy(orbit.pivot).add(offset);
+  camera.quaternion.premultiply(qDelta);
+  camera.updateMatrixWorld();
+
+  const forward = new THREE.Vector3();
+  camera.getWorldDirection(forward);
+  controls.target.copy(camera.position).addScaledVector(forward, distanceToTarget);
+}
+
+function endOrbit() {
+  orbit.active = false;
+}
+
+// Pointer events unify mouse/touch/pen, but two-finger touch rotation is
+// handled separately below (it needs the midpoint of both fingers, not a
+// single pointer's position) — so these only ever act on the mouse.
+renderer.domElement.addEventListener('pointerdown', (event) => {
+  if (event.pointerType !== 'mouse' || event.button !== 2) return;
+  event.preventDefault();
+  renderer.domElement.setPointerCapture(event.pointerId);
+  beginOrbit(event.clientX, event.clientY);
+});
+renderer.domElement.addEventListener('pointermove', (event) => {
+  if (event.pointerType !== 'mouse') return;
+  stepOrbit(event.clientX, event.clientY);
+});
+renderer.domElement.addEventListener('pointerup', (event) => {
+  if (event.pointerType === 'mouse' && event.button === 2) endOrbit();
 });
 
 renderer.domElement.addEventListener('touchstart', (event) => {
   tween = null;
+  if (event.touches.length !== 2) {
+    endOrbit();
+    return;
+  }
+  const [t1, t2] = event.touches;
+  beginOrbit((t1.clientX + t2.clientX) / 2, (t1.clientY + t2.clientY) / 2);
+});
+renderer.domElement.addEventListener('touchmove', (event) => {
   if (event.touches.length !== 2) return;
   const [t1, t2] = event.touches;
-  setPivot((t1.clientX + t2.clientX) / 2, (t1.clientY + t2.clientY) / 2);
+  stepOrbit((t1.clientX + t2.clientX) / 2, (t1.clientY + t2.clientY) / 2);
 });
+renderer.domElement.addEventListener('touchend', () => endOrbit());
+renderer.domElement.addEventListener('touchcancel', () => endOrbit());
 
 function easeOutCubic(t: number) {
   return 1 - Math.pow(1 - t, 3);
