@@ -78,6 +78,19 @@ controls.maxDistance = 50;
 controls.target.set(0, 1, 0);
 controls.update();
 
+// Pivot indicator: a small ring shown at the rotation pivot only when the
+// gesture actually started on real content (not the bounding-box fallback).
+// It billboards toward the camera and scales with distance so it reads as a
+// constant on-screen size regardless of zoom level.
+const pivotIndicator = new THREE.Mesh(
+  new THREE.RingGeometry(0.8, 1, 32),
+  new THREE.MeshBasicMaterial({ color: 0xffb020, side: THREE.DoubleSide, depthTest: false, transparent: true }),
+);
+pivotIndicator.visible = false;
+pivotIndicator.renderOrder = 999;
+scene.add(pivotIndicator);
+const PIVOT_INDICATOR_SCALE = 0.035; // fraction of camera distance
+
 function contentBoundsCenter(): THREE.Vector3 | null {
   const box3 = new THREE.Box3().setFromObject(content);
   return box3.isEmpty() ? null : box3.getCenter(new THREE.Vector3());
@@ -151,7 +164,7 @@ const raycaster = new THREE.Raycaster();
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 const ROTATE_SPEED = 0.5;
 
-function pickPivot(clientX: number, clientY: number): THREE.Vector3 {
+function pickPivot(clientX: number, clientY: number): { point: THREE.Vector3; hit: boolean } {
   const rect = renderer.domElement.getBoundingClientRect();
   const ndc = new THREE.Vector2(
     ((clientX - rect.left) / rect.width) * 2 - 1,
@@ -160,7 +173,8 @@ function pickPivot(clientX: number, clientY: number): THREE.Vector3 {
   raycaster.setFromCamera(ndc, camera);
 
   const hit = raycaster.intersectObject(content, true)[0];
-  return hit ? hit.point.clone() : (contentBoundsCenter() ?? controls.target.clone());
+  if (hit) return { point: hit.point.clone(), hit: true };
+  return { point: contentBoundsCenter() ?? controls.target.clone(), hit: false };
 }
 
 const orbit = { active: false, pivot: new THREE.Vector3(), lastX: 0, lastY: 0 };
@@ -168,9 +182,14 @@ const orbit = { active: false, pivot: new THREE.Vector3(), lastX: 0, lastY: 0 };
 function beginOrbit(clientX: number, clientY: number) {
   tween = null; // a fresh user gesture always wins over an in-flight zoom-to-fit
   orbit.active = true;
-  orbit.pivot.copy(pickPivot(clientX, clientY));
+  const { point, hit } = pickPivot(clientX, clientY);
+  orbit.pivot.copy(point);
   orbit.lastX = clientX;
   orbit.lastY = clientY;
+
+  pivotIndicator.visible = hit;
+  if (hit) pivotIndicator.position.copy(point);
+  setCursor('rotate');
 }
 
 function stepOrbit(clientX: number, clientY: number) {
@@ -204,23 +223,40 @@ function stepOrbit(clientX: number, clientY: number) {
 
 function endOrbit() {
   orbit.active = false;
+  pivotIndicator.visible = false;
+  setCursor('idle');
+}
+
+// Cursor reflects the active action: crosshair idle, a custom pan icon while
+// middle-drag/one-finger-drag is panning, a custom rotate icon while
+// right-drag/two-finger-drag is rotating.
+function setCursor(mode: 'idle' | 'pan' | 'rotate') {
+  if (mode === 'pan') renderer.domElement.style.cursor = "url('/cursor-pan.svg') 14 14, move";
+  else if (mode === 'rotate') renderer.domElement.style.cursor = "url('/cursor-rotate.svg') 14 14, grab";
+  else renderer.domElement.style.cursor = '';
 }
 
 // Pointer events unify mouse/touch/pen, but two-finger touch rotation is
 // handled separately below (it needs the midpoint of both fingers, not a
 // single pointer's position) — so these only ever act on the mouse.
 renderer.domElement.addEventListener('pointerdown', (event) => {
-  if (event.pointerType !== 'mouse' || event.button !== 2) return;
-  event.preventDefault();
-  renderer.domElement.setPointerCapture(event.pointerId);
-  beginOrbit(event.clientX, event.clientY);
+  if (event.pointerType !== 'mouse') return;
+  if (event.button === 2) {
+    event.preventDefault();
+    renderer.domElement.setPointerCapture(event.pointerId);
+    beginOrbit(event.clientX, event.clientY);
+  } else if (event.button === 1) {
+    setCursor('pan');
+  }
 });
 renderer.domElement.addEventListener('pointermove', (event) => {
   if (event.pointerType !== 'mouse') return;
   stepOrbit(event.clientX, event.clientY);
 });
 renderer.domElement.addEventListener('pointerup', (event) => {
-  if (event.pointerType === 'mouse' && event.button === 2) endOrbit();
+  if (event.pointerType !== 'mouse') return;
+  if (event.button === 2) endOrbit();
+  else if (event.button === 1) setCursor('idle');
 });
 
 renderer.domElement.addEventListener('touchstart', (event) => {
@@ -259,6 +295,12 @@ function animate() {
     camera.position.lerpVectors(tween.fromPos, tween.toPos, e);
     controls.target.lerpVectors(tween.fromTarget, tween.toTarget, e);
     if (t === 1) tween = null;
+  }
+
+  if (pivotIndicator.visible) {
+    pivotIndicator.lookAt(camera.position);
+    const scale = camera.position.distanceTo(pivotIndicator.position) * PIVOT_INDICATOR_SCALE;
+    pivotIndicator.scale.setScalar(scale);
   }
 
   controls.update();
