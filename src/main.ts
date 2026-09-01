@@ -78,16 +78,30 @@ controls.maxDistance = 50;
 controls.target.set(0, 1, 0);
 controls.update();
 
-// Pivot indicator: a small ring shown at the rotation pivot only when the
+// Pivot indicator: a 3D crosshair shown at the rotation pivot only when the
 // gesture actually started on real content (not the bounding-box fallback).
-// It billboards toward the camera and scales with distance so it reads as a
-// constant on-screen size regardless of zoom level.
-const pivotIndicator = new THREE.Mesh(
-  new THREE.RingGeometry(0.8, 1, 32),
-  new THREE.MeshBasicMaterial({ color: 0xffb020, side: THREE.DoubleSide, depthTest: false, transparent: true }),
+// Its three arms stay parallel to the world X/Y/Z axes (matching the
+// AxesHelper's red/green/blue convention) rather than billboarding toward
+// the camera — it's a point in space, not a screen-facing icon. It scales
+// with camera distance so it reads as a roughly constant on-screen size.
+function axisRod(length: number, thickness: number, axis: 0 | 1 | 2, color: number) {
+  const size: [number, number, number] = [thickness, thickness, thickness];
+  size[axis] = length;
+  const rod = new THREE.Mesh(
+    new THREE.BoxGeometry(...size),
+    new THREE.MeshBasicMaterial({ color, depthTest: false, transparent: true }),
+  );
+  rod.renderOrder = 999;
+  return rod;
+}
+
+const pivotIndicator = new THREE.Group();
+pivotIndicator.add(
+  axisRod(2, 0.08, 0, 0xff4444),
+  axisRod(2, 0.08, 1, 0x44dd44),
+  axisRod(2, 0.08, 2, 0x4488ff),
 );
 pivotIndicator.visible = false;
-pivotIndicator.renderOrder = 999;
 scene.add(pivotIndicator);
 const PIVOT_INDICATOR_SCALE = 0.035; // fraction of camera distance
 
@@ -163,6 +177,7 @@ renderer.domElement.addEventListener('touchend', (event) => {
 const raycaster = new THREE.Raycaster();
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 const ROTATE_SPEED = 0.5;
+const POLE_EPS = THREE.MathUtils.degToRad(2);
 
 function pickPivot(clientX: number, clientY: number): { point: THREE.Vector3; hit: boolean } {
   const rect = renderer.domElement.getBoundingClientRect();
@@ -207,9 +222,21 @@ function stepOrbit(clientX: number, clientY: number) {
   const deltaPhi = ((2 * Math.PI * dy) / h) * ROTATE_SPEED;
 
   const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0).normalize();
-  const qDelta = new THREE.Quaternion()
-    .setFromAxisAngle(WORLD_UP, deltaTheta)
-    .multiply(new THREE.Quaternion().setFromAxisAngle(right, deltaPhi));
+  const qYaw = new THREE.Quaternion().setFromAxisAngle(WORLD_UP, deltaTheta);
+  const qPitch = new THREE.Quaternion().setFromAxisAngle(right, deltaPhi);
+
+  // Rotating around world-up (yaw) never changes the camera's angle to
+  // world-up, so it's always safe. Pitch can push the camera's forward
+  // vector nearly parallel to world-up — exactly where camera.up (fixed at
+  // world-up) makes the lookAt() inside OrbitControls.update() degenerate,
+  // which is what caused the 180° snap when rotating all the way to the top
+  // or bottom. So: reject the pitch component for this step if it would
+  // cross too close to either pole; the yaw component still applies.
+  const qYawPitch = qYaw.clone().multiply(qPitch);
+  const tentativeForward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion.clone().premultiply(qYawPitch));
+  const angleToUp = tentativeForward.angleTo(WORLD_UP);
+  const pitchAllowed = angleToUp > POLE_EPS && angleToUp < Math.PI - POLE_EPS;
+  const qDelta = pitchAllowed ? qYawPitch : qYaw;
 
   const offset = camera.position.clone().sub(orbit.pivot).applyQuaternion(qDelta);
   camera.position.copy(orbit.pivot).add(offset);
@@ -298,7 +325,6 @@ function animate() {
   }
 
   if (pivotIndicator.visible) {
-    pivotIndicator.lookAt(camera.position);
     const scale = camera.position.distanceTo(pivotIndicator.position) * PIVOT_INDICATOR_SCALE;
     pivotIndicator.scale.setScalar(scale);
   }
