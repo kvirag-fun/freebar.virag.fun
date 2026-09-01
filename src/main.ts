@@ -91,23 +91,27 @@ const NAV_DIRECTIONS = [
 ];
 
 function makeNavFaceTexture(label: string): THREE.CanvasTexture {
-  const size = 128;
+  // Rendered well above the face's typical on-screen size (the cube can
+  // appear close to NAV_CUBE_SIZE across on a face viewed near head-on, at
+  // any device pixel ratio) so the text stays crisp rather than upscaled/soft.
+  const size = 512;
   const canvas = document.createElement('canvas');
   canvas.width = size;
   canvas.height = size;
   const ctx = canvas.getContext('2d')!;
   ctx.fillStyle = '#3a3a3a';
   ctx.fillRect(0, 0, size, size);
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
-  ctx.lineWidth = 4;
-  ctx.strokeRect(2, 2, size - 4, size - 4);
-  ctx.fillStyle = '#e8e6e0';
-  ctx.font = 'bold 20px sans-serif';
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+  ctx.lineWidth = 10;
+  ctx.strokeRect(5, 5, size - 10, size - 10);
+  ctx.fillStyle = '#f2f0ea';
+  ctx.font = '600 68px "Helvetica Neue", Arial, sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(label, size / 2, size / 2);
+  ctx.fillText(label, size / 2, size / 2 + 2);
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 8;
   return texture;
 }
 
