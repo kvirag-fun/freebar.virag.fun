@@ -141,8 +141,6 @@ function zoomToFit() {
   };
 }
 
-renderer.domElement.addEventListener('dblclick', () => zoomToFit());
-
 // Mobile: synthesize double-tap since dblclick from touch is unreliable.
 let lastTap = { time: 0, x: 0, y: 0 };
 renderer.domElement.addEventListener('touchend', (event) => {
@@ -280,10 +278,26 @@ renderer.domElement.addEventListener('pointermove', (event) => {
   if (event.pointerType !== 'mouse') return;
   stepOrbit(event.clientX, event.clientY);
 });
+// Double-middle-click zooms to fit (native dblclick only fires for the left
+// button, so this is detected manually — same pattern as the touch double-tap).
+let lastMiddleClick = { time: 0, x: 0, y: 0 };
+
 renderer.domElement.addEventListener('pointerup', (event) => {
   if (event.pointerType !== 'mouse') return;
-  if (event.button === 2) endOrbit();
-  else if (event.button === 1) setCursor('idle');
+  if (event.button === 2) {
+    endOrbit();
+  } else if (event.button === 1) {
+    setCursor('idle');
+    const now = performance.now();
+    const dx = event.clientX - lastMiddleClick.x;
+    const dy = event.clientY - lastMiddleClick.y;
+    if (now - lastMiddleClick.time < 300 && Math.hypot(dx, dy) < 10) {
+      zoomToFit();
+      lastMiddleClick = { time: 0, x: 0, y: 0 };
+    } else {
+      lastMiddleClick = { time: now, x: event.clientX, y: event.clientY };
+    }
+  }
 });
 
 renderer.domElement.addEventListener('touchstart', (event) => {
