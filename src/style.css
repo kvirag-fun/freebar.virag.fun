@@ -38,6 +38,7 @@ html, body {
   inset: 0;
   display: block;
   touch-action: none;
+  cursor: crosshair;
 }
 
 #build-stamp {
