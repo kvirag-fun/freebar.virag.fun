@@ -298,24 +298,31 @@ html, body {
   min-width: 22px;
 }
 
-/* Each principal-plane button is tinted by the axis its normal aligns to
-   (the common red/X, green/Y, blue/Z convention), so the plane it produces
-   reads at a glance instead of only through its two-letter label. Defined
-   before button.active below so the active state's white text still wins. */
-.clip-plane-axis-btns button[data-axis='x'] {
+/* Each letter of a principal-plane button's two-letter label (see
+   axisLetterSpan) is tinted by its OWN axis, the common red/X, green/Y,
+   blue/Z convention - so e.g. "ZY" reads as a blue Z next to a green Y,
+   rather than the whole label tinted by just the axis the button aligns
+   to. Defined before button.active below so its white override still wins. */
+.axis-letter-x {
   color: #ff4444;
 }
 
-.clip-plane-axis-btns button[data-axis='y'] {
+.axis-letter-y {
   color: #44dd44;
 }
 
-.clip-plane-axis-btns button[data-axis='z'] {
+.axis-letter-z {
   color: #4488ff;
 }
 
 .clip-plane-axis-btns button.active {
   background: #4a9eff;
+  color: #fff;
+}
+
+.clip-plane-axis-btns button.active .axis-letter-x,
+.clip-plane-axis-btns button.active .axis-letter-y,
+.clip-plane-axis-btns button.active .axis-letter-z {
   color: #fff;
 }
 

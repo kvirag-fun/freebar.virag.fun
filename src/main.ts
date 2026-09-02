@@ -1749,6 +1749,15 @@ function reapplyClipPlaneEverywhere() {
   panes.forEach((pane) => pane.applyClipSelection());
 }
 
+// Each principal-plane button's two-letter label (see renderClipPlaneList)
+// is spelled out with one colored span per letter, rather than tinting the
+// whole label with the button's own axis — so e.g. the "ZY" button reads as
+// a blue Z next to a green Y, matching each letter to its own axis color
+// wherever else that convention appears, not just to the axis it aligns to.
+function axisLetterSpan(letter: 'x' | 'y' | 'z'): string {
+  return `<span class="axis-letter-${letter}">${letter.toUpperCase()}</span>`;
+}
+
 function renderClipPlaneList() {
   clipPlaneEmpty.hidden = clipPlanes.length > 0;
   clipPlaneList.innerHTML = clipPlanes
@@ -1759,9 +1768,9 @@ function renderClipPlaneList() {
     <li class="clip-plane-row" data-id="${p.id}">
       <input type="text" class="clip-plane-name" value="${escapeHtml(p.name)}" aria-label="Plane name" />
       <span class="clip-plane-axis-btns">
-        <button type="button" data-axis="x" class="${activeClass('x')}" title="Align to the ZY plane (normal along X)">ZY</button>
-        <button type="button" data-axis="y" class="${activeClass('y')}" title="Align to the XZ plane (normal along Y)">XZ</button>
-        <button type="button" data-axis="z" class="${activeClass('z')}" title="Align to the XY plane (normal along Z)">XY</button>
+        <button type="button" data-axis="x" class="${activeClass('x')}" title="Align to the ZY plane (normal along X)">${axisLetterSpan('z')}${axisLetterSpan('y')}</button>
+        <button type="button" data-axis="y" class="${activeClass('y')}" title="Align to the XZ plane (normal along Y)">${axisLetterSpan('x')}${axisLetterSpan('z')}</button>
+        <button type="button" data-axis="z" class="${activeClass('z')}" title="Align to the XY plane (normal along Z)">${axisLetterSpan('x')}${axisLetterSpan('y')}</button>
         <button type="button" data-axis="custom" class="${activeClass('custom')}" title="Custom orientation (as originally placed)">&ang;</button>
         <button type="button" data-axis="flip" title="Flip which side is kept">&#8645;</button>
       </span>
