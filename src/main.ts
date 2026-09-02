@@ -1758,6 +1758,15 @@ function axisLetterSpan(letter: 'x' | 'y' | 'z'): string {
   return `<span class="axis-letter-${letter}">${letter.toUpperCase()}</span>`;
 }
 
+// data-axis names the raw three.js component each button below sets the
+// normal to (plane.normal.set(1,0,0) for "x", etc. — see the click handler
+// further down) — but the on-screen axis gizmo labels/colors those raw
+// components under a rotated convention (worldAxesHelper: raw X is drawn
+// and labeled as "Y" (green), raw Y as "Z" (blue), raw Z as "X" (red)), so
+// a plane's displayed name has to go through that same relabeling to
+// actually match what the gizmo shows: data-axis "x" (raw X, gizmo Y) is
+// perpendicular to gizmo Y, i.e. the "ZX" plane; "y" (raw Y, gizmo Z) is
+// the "XY" plane; "z" (raw Z, gizmo X) is the "ZY" plane.
 function renderClipPlaneList() {
   clipPlaneEmpty.hidden = clipPlanes.length > 0;
   clipPlaneList.innerHTML = clipPlanes
@@ -1768,9 +1777,9 @@ function renderClipPlaneList() {
     <li class="clip-plane-row" data-id="${p.id}">
       <input type="text" class="clip-plane-name" value="${escapeHtml(p.name)}" aria-label="Plane name" />
       <span class="clip-plane-axis-btns">
-        <button type="button" data-axis="x" class="${activeClass('x')}" title="Align to the ZY plane (normal along X)">${axisLetterSpan('z')}${axisLetterSpan('y')}</button>
-        <button type="button" data-axis="y" class="${activeClass('y')}" title="Align to the XZ plane (normal along Y)">${axisLetterSpan('x')}${axisLetterSpan('z')}</button>
-        <button type="button" data-axis="z" class="${activeClass('z')}" title="Align to the XY plane (normal along Z)">${axisLetterSpan('x')}${axisLetterSpan('y')}</button>
+        <button type="button" data-axis="x" class="${activeClass('x')}" title="Align to the ZX plane (normal along Y)">${axisLetterSpan('z')}${axisLetterSpan('x')}</button>
+        <button type="button" data-axis="y" class="${activeClass('y')}" title="Align to the XY plane (normal along Z)">${axisLetterSpan('x')}${axisLetterSpan('y')}</button>
+        <button type="button" data-axis="z" class="${activeClass('z')}" title="Align to the ZY plane (normal along X)">${axisLetterSpan('z')}${axisLetterSpan('y')}</button>
         <button type="button" data-axis="custom" class="${activeClass('custom')}" title="Custom orientation (as originally placed)">&ang;</button>
         <button type="button" data-axis="flip" title="Flip which side is kept">&#8645;</button>
       </span>
