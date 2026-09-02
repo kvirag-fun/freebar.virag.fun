@@ -9,6 +9,8 @@ const navCubeBtn = document.querySelector<HTMLButtonElement>('#nav-cube-btn')!;
 const axisGizmoBtn = document.querySelector<HTMLButtonElement>('#axis-gizmo-btn')!;
 const clipPlaneBtn = document.querySelector<HTMLButtonElement>('#clip-plane-btn')!;
 const clipPlaneDialog = document.querySelector<HTMLElement>('#clip-plane-dialog')!;
+const clipPlaneDialogPanel = document.querySelector<HTMLElement>('#clip-plane-dialog .modal-panel')!;
+const clipPlaneDialogHeader = document.querySelector<HTMLElement>('#clip-plane-dialog .modal-header')!;
 const clipPlaneCloseBtn = document.querySelector<HTMLButtonElement>('#clip-plane-close-btn')!;
 const clipPlaneList = document.querySelector<HTMLElement>('#clip-plane-list')!;
 const clipPlaneEmpty = document.querySelector<HTMLElement>('#clip-plane-empty')!;
@@ -27,7 +29,11 @@ let axisGizmoVisible = true;
 // only one clips the model at a time (see applyActiveClipPlane). Each plane
 // is a point + unit normal — the plane keeps the half-space the normal points
 // into and clips away the other side, matching THREE.Plane's own convention.
-type ClipPlaneDef = { id: string; name: string; point: THREE.Vector3; normal: THREE.Vector3 };
+// originalNormal is the direction captured at placement time (facing the
+// camera) and never mutates — the X/Y/Z/custom buttons all read against it
+// (see clipPlaneAlignmentKind) so the row can show which one is active, and
+// "custom" can restore it after an axis realignment.
+type ClipPlaneDef = { id: string; name: string; point: THREE.Vector3; normal: THREE.Vector3; originalNormal: THREE.Vector3 };
 let clipPlanes: ClipPlaneDef[] = [];
 let activeClipPlaneId: string | null = null;
 let nextClipPlaneNumber = 1;
@@ -1096,6 +1102,20 @@ function escapeHtml(text: string): string {
   return text.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 }
 
+// Which of the row's four alignment buttons should read as "active" for a
+// given normal — exactly axis-aligned (either sign, since flip doesn't change
+// this) counts as that axis; anything else (including the as-placed,
+// view-facing direction most planes start with) is "custom".
+type ClipPlaneAlignment = 'x' | 'y' | 'z' | 'custom';
+const AXIS_ALIGN_EPS = 1e-6;
+function clipPlaneAlignmentKind(normal: THREE.Vector3): ClipPlaneAlignment {
+  const offAxis = (a: number, b: number) => Math.abs(a) < AXIS_ALIGN_EPS && Math.abs(b) < AXIS_ALIGN_EPS;
+  if (offAxis(normal.y, normal.z)) return 'x';
+  if (offAxis(normal.x, normal.z)) return 'y';
+  if (offAxis(normal.x, normal.y)) return 'z';
+  return 'custom';
+}
+
 function applyActiveClipPlane() {
   const active = clipPlanes.find((p) => p.id === activeClipPlaneId);
   if (active) sharedClipPlane.setFromNormalAndCoplanarPoint(active.normal, active.point);
@@ -1104,28 +1124,35 @@ function applyActiveClipPlane() {
 function renderClipPlaneList() {
   clipPlaneEmpty.hidden = clipPlanes.length > 0;
   clipPlaneList.innerHTML = clipPlanes
-    .map(
-      (p) => `
+    .map((p) => {
+      const kind = clipPlaneAlignmentKind(p.normal);
+      const activeClass = (k: ClipPlaneAlignment) => (k === kind ? ' active' : '');
+      return `
     <li class="clip-plane-row" data-id="${p.id}">
       <input type="radio" name="clip-plane-active" class="clip-plane-radio" ${p.id === activeClipPlaneId ? 'checked' : ''} aria-label="Enable ${escapeHtml(p.name)}" />
       <input type="text" class="clip-plane-name" value="${escapeHtml(p.name)}" aria-label="Plane name" />
       <span class="clip-plane-axis-btns">
-        <button type="button" data-axis="x" title="Align to X axis">X</button>
-        <button type="button" data-axis="y" title="Align to Y axis">Y</button>
-        <button type="button" data-axis="z" title="Align to Z axis">Z</button>
-        <button type="button" data-axis="flip" title="Flip normal">&#8645;</button>
+        <button type="button" data-axis="x" class="${activeClass('x')}" title="Align to X axis">X</button>
+        <button type="button" data-axis="y" class="${activeClass('y')}" title="Align to Y axis">Y</button>
+        <button type="button" data-axis="z" class="${activeClass('z')}" title="Align to Z axis">Z</button>
+        <button type="button" data-axis="custom" class="${activeClass('custom')}" title="Custom orientation (as originally placed)">&ang;</button>
+        <button type="button" data-axis="flip" title="Flip which side is kept">&#8645;</button>
       </span>
-      <button type="button" class="clip-plane-view-btn" data-dir="pos" title="View from + side">View &rarr;</button>
-      <button type="button" class="clip-plane-view-btn" data-dir="neg" title="View from &minus; side">View &larr;</button>
       <button type="button" class="clip-plane-delete-btn" title="Delete plane" aria-label="Delete ${escapeHtml(p.name)}">&times;</button>
-    </li>`,
-    )
+    </li>`;
+    })
     .join('');
 }
 
 function addClipPlane(point: THREE.Vector3, normal: THREE.Vector3) {
   const id = `plane-${nextClipPlaneNumber}`;
-  const def: ClipPlaneDef = { id, name: `Plane ${nextClipPlaneNumber}`, point: point.clone(), normal: normal.clone() };
+  const def: ClipPlaneDef = {
+    id,
+    name: `Plane ${nextClipPlaneNumber}`,
+    point: point.clone(),
+    normal: normal.clone(),
+    originalNormal: normal.clone(),
+  };
   nextClipPlaneNumber++;
   clipPlanes.push(def);
   activeClipPlaneId = id;
@@ -1149,8 +1176,36 @@ clipPlaneCloseBtn.addEventListener('click', () => {
   clipPlaneDialog.hidden = true;
 });
 
-clipPlaneDialog.addEventListener('click', (event) => {
-  if (event.target === clipPlaneDialog) clipPlaneDialog.hidden = true;
+// Draggable by its title bar, since the dialog can otherwise land over
+// whatever part of the model the user most needs to see — the panel is
+// pulled out of the overlay's centering flex layout into position: fixed
+// on the first drag, then just repositioned on every drag after that
+// (including ones after the dialog's been closed and reopened).
+let clipDialogDragOffset: { x: number; y: number } | null = null;
+
+clipPlaneDialogHeader.addEventListener('pointerdown', (event) => {
+  if ((event.target as HTMLElement).closest('button')) return;
+  const rect = clipPlaneDialogPanel.getBoundingClientRect();
+  clipDialogDragOffset = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  clipPlaneDialogPanel.style.position = 'fixed';
+  clipPlaneDialogPanel.style.margin = '0';
+  clipPlaneDialogPanel.style.left = `${rect.left}px`;
+  clipPlaneDialogPanel.style.top = `${rect.top}px`;
+  clipPlaneDialogHeader.setPointerCapture(event.pointerId);
+});
+
+clipPlaneDialogHeader.addEventListener('pointermove', (event) => {
+  if (!clipDialogDragOffset) return;
+  const maxLeft = Math.max(0, window.innerWidth - clipPlaneDialogPanel.offsetWidth);
+  const maxTop = Math.max(0, window.innerHeight - clipPlaneDialogPanel.offsetHeight);
+  const left = THREE.MathUtils.clamp(event.clientX - clipDialogDragOffset.x, 0, maxLeft);
+  const top = THREE.MathUtils.clamp(event.clientY - clipDialogDragOffset.y, 0, maxTop);
+  clipPlaneDialogPanel.style.left = `${left}px`;
+  clipPlaneDialogPanel.style.top = `${top}px`;
+});
+
+clipPlaneDialogHeader.addEventListener('pointerup', () => {
+  clipDialogDragOffset = null;
 });
 
 clipPlaneAddBtn.addEventListener('click', () => {
@@ -1204,18 +1259,14 @@ clipPlaneList.addEventListener('click', (event) => {
     return;
   }
 
-  if (button.classList.contains('clip-plane-view-btn')) {
-    const dir = button.dataset.dir === 'pos' ? plane.normal.clone() : plane.normal.clone().negate();
-    panes.forEach((pane) => pane.snapToView(dir));
-    return;
-  }
-
   const axis = button.dataset.axis;
   if (axis === 'x') plane.normal.set(1, 0, 0);
   else if (axis === 'y') plane.normal.set(0, 1, 0);
   else if (axis === 'z') plane.normal.set(0, 0, 1);
+  else if (axis === 'custom') plane.normal.copy(plane.originalNormal);
   else if (axis === 'flip') plane.normal.negate();
   if (plane.id === activeClipPlaneId) applyActiveClipPlane();
+  renderClipPlaneList();
 });
 
 window.addEventListener('resize', () => {

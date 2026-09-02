@@ -183,11 +183,15 @@ html, body {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5);
+  /* Kept light on purpose: the viewport behind stays a live preview of the
+     cut while the dialog is open, so this is just enough of a scrim to read
+     as "the dialog has focus," not a full dim. */
+  background: rgba(0, 0, 0, 0.12);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 20;
+  pointer-events: none;
 }
 
 .modal-overlay[hidden] {
@@ -203,6 +207,10 @@ html, body {
   border-radius: 8px;
   padding: 16px;
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+  /* The overlay lets clicks/drags pass through to the 3D view behind it
+     (see .modal-overlay) so the viewport stays interactive while the
+     dialog is open; the panel itself opts back in. */
+  pointer-events: auto;
 }
 
 .modal-header {
@@ -210,6 +218,11 @@ html, body {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 12px;
+  cursor: move;
+}
+
+.modal-header button {
+  cursor: pointer;
 }
 
 .modal-header h2 {
@@ -289,6 +302,15 @@ html, body {
 .clip-plane-axis-btns button {
   padding: 4px 6px;
   min-width: 22px;
+}
+
+.clip-plane-axis-btns button.active {
+  background: #4a9eff;
+  color: #fff;
+}
+
+.clip-plane-axis-btns button.active:hover {
+  background: #3a8eef;
 }
 
 .clip-plane-delete-btn {
