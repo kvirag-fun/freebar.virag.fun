@@ -140,6 +140,66 @@ function createCutEdgeHighlight(): { object: THREE.LineSegments; layer: number }
   return { object, layer };
 }
 
+// Small red sphere marking a clicked-and-committed plane point (see
+// makePointMarker) or, during placement, a live preview of where the next
+// click would land (see createPane's placementHoverMarker). Normal
+// depthTest, so it reads as sitting on the surface — hidden behind other
+// geometry the same way the surface itself would be — rather than an
+// always-on-top UI overlay. It sits at the exact plane point, so — unlike
+// the boundary highlight, which is nudged just enough to survive the clip
+// test on the kept side — the active clipping plane would slice it clean in
+// half; every pane renders MARKER_LAYER in a second, unclipped pass instead
+// (see step()) so markers always show whole regardless of which plane is
+// currently cutting.
+const MARKER_LAYER = 10;
+const CLIP_POINT_MARKER_COLOR = 0xff3b30;
+const CLIP_POINT_MARKER_RADIUS = 0.035;
+function makePointMarker(): THREE.Mesh {
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(CLIP_POINT_MARKER_RADIUS, 12, 12),
+    new THREE.MeshBasicMaterial({ color: CLIP_POINT_MARKER_COLOR }),
+  );
+  mesh.visible = false;
+  mesh.layers.set(MARKER_LAYER);
+  return mesh;
+}
+
+// One dot per defined plane, at the exact point it was placed through —
+// otherwise, once a plane's been renamed or realigned to an axis, there's no
+// way to tell where the original click landed. Lives in the shared scene
+// (not a per-pane exclusive layer, unlike the hover/cut-highlight markers)
+// since it's meant to be visible in every open pane at once; toggled by
+// openClipPlaneDialog/closeClipPlaneDialog rather than shown all the time,
+// since it's only meaningful while actively managing the plane list.
+const clipPointMarkersGroup = new THREE.Group();
+clipPointMarkersGroup.visible = false;
+scene.add(clipPointMarkersGroup);
+
+function refreshClipPointMarkers() {
+  clipPointMarkersGroup.children.forEach((child) => {
+    const mesh = child as THREE.Mesh;
+    mesh.geometry.dispose();
+    (mesh.material as THREE.Material).dispose();
+  });
+  clipPointMarkersGroup.clear();
+  clipPlanes.forEach((def) => {
+    const marker = makePointMarker();
+    marker.position.copy(def.point);
+    marker.visible = true;
+    clipPointMarkersGroup.add(marker);
+  });
+}
+
+function openClipPlaneDialog() {
+  clipPlaneDialog.hidden = false;
+  clipPointMarkersGroup.visible = true;
+}
+
+function closeClipPlaneDialog() {
+  clipPlaneDialog.hidden = true;
+  clipPointMarkersGroup.visible = false;
+}
+
 // Where a triangle's three plane-distances straddle zero, exactly two of its
 // edges cross the plane — this returns those two crossing points (already in
 // world space, since the caller passes world-space triangle vertices), or
@@ -499,6 +559,15 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   let selectedClipPlane: THREE.Plane | null = null;
   const { object: cutEdgeHighlight, layer: cutEdgeHighlightLayer } = createCutEdgeHighlight();
   camera.layers.enable(cutEdgeHighlightLayer);
+  camera.layers.enable(MARKER_LAYER);
+
+  // Live preview of where a "+ Add plane" click would land — follows the
+  // cursor while placementModeActive, showing on whichever surface (if any)
+  // it's currently over. Only ever one pane's marker is visible at a time
+  // (only one canvas can be hovered), so sharing MARKER_LAYER across every
+  // pane rather than keeping it exclusive is harmless.
+  const placementHoverMarker = makePointMarker();
+  scene.add(placementHoverMarker);
 
   function applyClipSelection() {
     const def = clipPlanes.find((p) => p.id === selectedClipPlaneId) ?? null;
@@ -1005,9 +1074,11 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     if (!orbit.active && !isPanning) {
       renderer.domElement.style.cursor = navCubeHovering && navCubeShowingFull() ? 'pointer' : '';
     }
+    updatePlacementHoverMarker(event.clientX, event.clientY);
   });
   renderer.domElement.addEventListener('pointerleave', () => {
     navCubeHovering = false;
+    placementHoverMarker.visible = false;
   });
   renderer.domElement.addEventListener('pointerup', (event) => {
     if (event.pointerType !== 'mouse') return;
@@ -1038,6 +1109,18 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     }
   });
 
+  // Filtered to actual surfaces: content also holds boxEdges (a LineSegments
+  // outline child of box), and Three.js's line-picking uses a generous
+  // screen-space threshold that can report an imprecise "hit" near an edge
+  // ahead of, or instead of, the real face intersection — silently placing
+  // the plane (or the hover preview below) through the wrong point.
+  function raycastContentMesh(clientX: number, clientY: number): THREE.Intersection | null {
+    const rect = renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+    raycaster.setFromCamera(ndc, camera);
+    return raycaster.intersectObject(content, true).find((h) => h.object instanceof THREE.Mesh) ?? null;
+  }
+
   // Cutting-plane placement: while the dialog's "+ Add plane" flow is
   // waiting for a click (placementModeActive), a left-click anywhere on the
   // model places a plane through that point, oriented to that pane's current
@@ -1045,15 +1128,7 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   // parallel to my viewing direction". Nav cube clicks are ignored entirely
   // during placement, so the two never mix.
   function placeClipPlaneAt(clientX: number, clientY: number) {
-    const rect = renderer.domElement.getBoundingClientRect();
-    const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
-    raycaster.setFromCamera(ndc, camera);
-    // Filtered to actual surfaces: content also holds boxEdges (a LineSegments
-    // outline child of box), and Three.js's line-picking uses a generous
-    // screen-space threshold that can report an imprecise "hit" near an edge
-    // ahead of, or instead of, the real face intersection — silently placing
-    // the plane through the wrong point.
-    const hit = raycaster.intersectObject(content, true).find((h) => h.object instanceof THREE.Mesh);
+    const hit = raycastContentMesh(clientX, clientY);
     if (!hit) return;
     const point = hit.point.clone();
     // Kept side defaults to the far side (away from the camera), not the
@@ -1061,6 +1136,20 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     // facing the viewer instead of just the same outer surface just clicked.
     const normal = point.clone().sub(camera.position).normalize();
     setClipPlaneSelection(addClipPlane(point, normal));
+    placementHoverMarker.visible = false;
+  }
+
+  // Live preview shown while waiting for that click — lets the user see
+  // exactly where the plane will land, on whatever surface the cursor is
+  // currently over, before committing.
+  function updatePlacementHoverMarker(clientX: number, clientY: number) {
+    if (!placementModeActive) {
+      placementHoverMarker.visible = false;
+      return;
+    }
+    const hit = raycastContentMesh(clientX, clientY);
+    placementHoverMarker.visible = !!hit;
+    if (hit) placementHoverMarker.position.copy(hit.point);
   }
 
   renderer.domElement.addEventListener('touchstart', (event) => {
@@ -1151,6 +1240,22 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     renderer.clippingPlanes = selectedClipPlane ? [selectedClipPlane] : [];
     renderer.render(scene, camera);
     renderer.clippingPlanes = [];
+
+    // Point markers sit exactly on their plane, so the clip above would slice
+    // them clean in half — drawn again here, restricted to just that layer,
+    // with clipping off and the depth buffer from the pass above already in
+    // place (so they're still hidden behind nearer real geometry, just never
+    // by the plane they mark). scene.background has to be cleared first:
+    // WebGLRenderer repaints it at the start of every render() call
+    // regardless of autoClear, which would otherwise blank out the pass above.
+    const layersBefore = camera.layers.mask;
+    const backgroundBefore = scene.background;
+    camera.layers.set(MARKER_LAYER);
+    scene.background = null;
+    renderer.render(scene, camera);
+    scene.background = backgroundBefore;
+    camera.layers.mask = layersBefore;
+
     renderNavCube();
     renderAxisGizmo();
   }
@@ -1208,6 +1313,9 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     hitTestNavCube,
     refreshClipSelectorOptions,
     applyClipSelection,
+    hidePlacementHoverMarker: () => {
+      placementHoverMarker.visible = false;
+    },
   };
 }
 
@@ -1383,24 +1491,26 @@ function addClipPlane(point: THREE.Vector3, normal: THREE.Vector3): string {
   nextClipPlaneNumber++;
   clipPlanes.push(def);
   exitPlacementMode();
-  clipPlaneDialog.hidden = false;
+  openClipPlaneDialog();
   renderClipPlaneList();
   refreshAllClipPlaneSelectors();
+  refreshClipPointMarkers();
   return id;
 }
 
 function exitPlacementMode() {
   placementModeActive = false;
   clipPlaneBanner.hidden = true;
+  panes.forEach((pane) => pane.hidePlacementHoverMarker());
 }
 
 clipPlaneBtn.addEventListener('click', () => {
   renderClipPlaneList();
-  clipPlaneDialog.hidden = false;
+  openClipPlaneDialog();
 });
 
 clipPlaneCloseBtn.addEventListener('click', () => {
-  clipPlaneDialog.hidden = true;
+  closeClipPlaneDialog();
 });
 
 // Draggable by its title bar, since the dialog can otherwise land over
@@ -1436,20 +1546,20 @@ clipPlaneDialogHeader.addEventListener('pointerup', () => {
 });
 
 clipPlaneAddBtn.addEventListener('click', () => {
-  clipPlaneDialog.hidden = true;
+  closeClipPlaneDialog();
   clipPlaneBanner.hidden = false;
   placementModeActive = true;
 });
 
 clipPlaneCancelBtn.addEventListener('click', () => {
   exitPlacementMode();
-  clipPlaneDialog.hidden = false;
+  openClipPlaneDialog();
 });
 
 window.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && placementModeActive) {
     exitPlacementMode();
-    clipPlaneDialog.hidden = false;
+    openClipPlaneDialog();
   }
 });
 
@@ -1481,6 +1591,7 @@ clipPlaneList.addEventListener('click', (event) => {
     clipPlanes = clipPlanes.filter((p) => p.id !== id);
     renderClipPlaneList();
     refreshAllClipPlaneSelectors();
+    refreshClipPointMarkers();
     return;
   }
 
