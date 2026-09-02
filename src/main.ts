@@ -1123,18 +1123,29 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
 
   // Cutting-plane placement: while the dialog's "+ Add plane" flow is
   // waiting for a click (placementModeActive), a left-click anywhere on the
-  // model places a plane through that point, oriented to that pane's current
-  // viewing direction — matching "click a point, the plane goes through it,
-  // parallel to my viewing direction". Nav cube clicks are ignored entirely
-  // during placement, so the two never mix.
+  // model places a plane through that point, oriented to the surface (face)
+  // under the cursor — NOT to the camera's viewing direction. A
+  // view-derived orientation would depend on where you happened to be
+  // standing when you clicked, which is a meaningless cut in most cases
+  // (the object's own geometry rarely lines up with an arbitrary camera
+  // angle); the surface the red dot is sitting on is the one orientation
+  // that means the same thing regardless of viewpoint.
   function placeClipPlaneAt(clientX: number, clientY: number) {
     const hit = raycastContentMesh(clientX, clientY);
     if (!hit) return;
     const point = hit.point.clone();
+    const faceNormal = hit.face
+      ? hit.face.normal.clone().applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld)).normalize()
+      : point.clone().sub(camera.position).normalize();
     // Kept side defaults to the far side (away from the camera), not the
     // near one, so the newly-placed cut immediately shows the cross-section
     // facing the viewer instead of just the same outer surface just clicked.
-    const normal = point.clone().sub(camera.position).normalize();
+    // The face normal already tells us which way is "outward" at this point;
+    // it only needs flipping when it happens to point back at the camera
+    // (the common case: you're looking at the outside of the surface you
+    // clicked).
+    const towardCamera = camera.position.clone().sub(point).normalize();
+    const normal = faceNormal.dot(towardCamera) > 0 ? faceNormal.clone().negate() : faceNormal;
     setClipPlaneSelection(addClipPlane(point, normal));
     placementHoverMarker.visible = false;
   }
