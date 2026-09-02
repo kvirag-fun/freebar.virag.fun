@@ -1396,7 +1396,11 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     const rect = renderer.domElement.getBoundingClientRect();
     const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
     raycaster.setFromCamera(ndc, camera);
-    def.point.copy(closestPointOnLineToRay(dragLineAnchor, dragLineDir, raycaster.ray.origin, raycaster.ray.direction));
+    const closest = closestPointOnLineToRay(dragLineAnchor, dragLineDir, raycaster.ray.origin, raycaster.ray.direction);
+    // Mirrored through the drag-start point: the raw closest-point mapping
+    // ran backwards from what felt natural while dragging, so every frame's
+    // result is reflected through the anchor to reverse it.
+    def.point.copy(dragLineAnchor).multiplyScalar(2).sub(closest);
     refreshClipPlaneDef(def);
     reapplyClipPlaneEverywhere();
     refreshClipPointMarkers();
