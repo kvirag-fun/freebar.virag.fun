@@ -9,7 +9,10 @@ const navCubeBtn = document.querySelector<HTMLButtonElement>('#nav-cube-btn')!;
 const axisGizmoBtn = document.querySelector<HTMLButtonElement>('#axis-gizmo-btn')!;
 
 // Shared across every pane, so one button hides/shows the cube/axes everywhere at once.
-let navCubeVisible = true;
+// The nav cube cycles full -> mini -> off -> full: "mini" renders small and
+// schematic, expanding to full size/detail on hover (see createPane).
+type NavCubeMode = 'full' | 'mini' | 'off';
+let navCubeMode: NavCubeMode = 'full';
 let axisGizmoVisible = true;
 
 const scene = new THREE.Scene();
@@ -70,12 +73,34 @@ function easeOutCubic(t: number) {
   return 1 - Math.pow(1 - t, 3);
 }
 
+function makeAxisLabelSprite(text: string, color: string): THREE.Sprite {
+  const size = 64;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = color;
+  ctx.font = 'bold 42px "Helvetica Neue", Arial, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, size / 2, size / 2 + 2);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, depthTest: false, transparent: true }));
+  sprite.renderOrder = 1000;
+  sprite.scale.set(0.4, 0.4, 1);
+  return sprite;
+}
+
 // A single-direction arrow (shaft + cone tip) from the origin out along one
 // axis, for the corner axis-indicator gizmo — unlike axisRod above, which is
 // a symmetric double-ended rod through the origin (used for the pivot
 // indicator), this points one way only, matching how a "which way is X/Y/Z"
-// aid should read.
-function axisArrow(length: number, thickness: number, axis: 0 | 1 | 2, color: number) {
+// aid should read. The label sprite always billboards to face the camera
+// (a Sprite's own rotation is special-cased in WebGL regardless of its
+// parent's), even though it's parented to the group that rotates with the
+// view, so it tracks the arrow tip's position but always reads upright.
+function axisArrow(length: number, thickness: number, axis: 0 | 1 | 2, color: number, label: string, labelColor: string) {
   const material = new THREE.MeshBasicMaterial({ color, depthTest: false, transparent: true });
   const shaftLength = length * 0.8;
   const shaft = new THREE.Mesh(new THREE.CylinderGeometry(thickness, thickness, shaftLength, 8), material);
@@ -83,8 +108,11 @@ function axisArrow(length: number, thickness: number, axis: 0 | 1 | 2, color: nu
   const head = new THREE.Mesh(new THREE.ConeGeometry(thickness * 2.5, length - shaftLength, 8), material);
   head.position.y = shaftLength + (length - shaftLength) / 2;
 
+  const labelSprite = makeAxisLabelSprite(label, labelColor);
+  labelSprite.position.y = length + 0.22;
+
   const group = new THREE.Group();
-  group.add(shaft, head);
+  group.add(shaft, head, labelSprite);
   group.renderOrder = 999;
   // These primitives are built along local +Y; rotate so that axis points
   // along the requested world axis instead (Y needs no rotation).
@@ -106,7 +134,9 @@ const AXIS_GIZMO_MARGIN_BOTTOM = 34; // clears #build-stamp, which sits in the s
 // Navigation cube: one labeled face per standard view. BoxGeometry's default
 // material-group order is [+X, -X, +Y, -Y, +Z, -Z], which is exactly the
 // order these labels and directions are listed in below.
-const NAV_CUBE_SIZE = 225; // px, corner overlay size (180 * 1.25)
+const NAV_CUBE_SIZE_FULL = 225; // px, corner overlay size (180 * 1.25)
+const NAV_CUBE_SIZE_MINI = 90; // px, schematic size shown when not hovered in 'mini' mode
+const NAV_CUBE_SIZE_ANIM_SPEED = 900; // px/sec, growing/shrinking between mini and full
 const NAV_LABELS = ['RIGHT', 'LEFT', 'TOP', 'BOTTOM', 'FRONT', 'BACK'];
 const NAV_CUBE_HALF = 0.7; // half-extent of the 1.4-unit BoxGeometry below
 const NAV_EDGE_FRACTION = 0.5; // beyond this fraction of the half-extent, an axis counts as "near that edge" too
@@ -122,9 +152,12 @@ function makeNavFaceTexture(label: string): THREE.CanvasTexture {
   const ctx = canvas.getContext('2d')!;
   ctx.fillStyle = '#3a3a3a';
   ctx.fillRect(0, 0, size, size);
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
-  ctx.lineWidth = 10;
-  ctx.strokeRect(5, 5, size - 10, size - 10);
+  // The real face boundary is muted relative to the zone grid below, so the
+  // actual clickable zones (not just where one face ends) read as the more
+  // prominent lines.
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+  ctx.lineWidth = 4;
+  ctx.strokeRect(2, 2, size - 4, size - 4);
 
   // A 3x3 grid marking the actual clickable zones: the center cell is a
   // pure single-axis click, the four edge-mid cells combine with the
@@ -263,22 +296,63 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     return new THREE.MeshBasicMaterial({ map });
   });
   const navCube = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.4, 1.4), navMaterials);
+
+  // Schematic version shown at NAV_CUBE_SIZE_MINI in 'mini' mode: a plain
+  // translucent box with crisp edges, no labels/zones — just enough to read
+  // as "there's a nav cube here" until hovered, at which point the pane
+  // switches to showing navCube at full size instead (see step()).
+  const miniCubeGeometry = new THREE.BoxGeometry(1.4, 1.4, 1.4);
+  const miniCube = new THREE.Mesh(
+    miniCubeGeometry,
+    new THREE.MeshBasicMaterial({ color: 0x4a9eff, transparent: true, opacity: 0.35, depthWrite: false }),
+  );
+  const miniCubeEdges = new THREE.LineSegments(
+    new THREE.EdgesGeometry(miniCubeGeometry),
+    new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.6 }),
+  );
+  miniCube.add(miniCubeEdges);
+
   const navScene = new THREE.Group();
-  navScene.add(navCube);
+  navScene.add(navCube, miniCube);
   const navCamera = new THREE.OrthographicCamera(-1.6, 1.6, 1.6, -1.6, 0.1, 10);
   navCamera.position.set(0, 0, 4);
   navCamera.lookAt(0, 0, 0);
   const navViewport = new THREE.Vector4();
 
-  // Briefly flashes whichever face(s) a click resolved to (1 for a face, 2
-  // for an edge, 3 for a corner), fading back to normal over HIGHLIGHT_MS —
-  // pure visual feedback that the click registered and which axes it used.
-  const HIGHLIGHT_MS = 400;
-  const HIGHLIGHT_COLOR = new THREE.Color(0xffcf7a);
-  const NORMAL_COLOR = new THREE.Color(0xffffff);
-  let faceHighlight: { indices: number[]; start: number } | null = null;
+  // In 'mini' mode the cube renders small/schematic until hovered, at which
+  // point it's treated as 'full' (showing the real labeled cube at full
+  // size, clickable) until the pointer leaves. displaySize is the actual
+  // animated on-screen size, grown/shrunk at NAV_CUBE_SIZE_ANIM_SPEED px/sec
+  // each frame — hit-testing and rendering both read it, so they never
+  // disagree about how big the cube currently looks.
+  let navCubeHovering = false;
+  let displaySize = navCubeMode === 'mini' ? NAV_CUBE_SIZE_MINI : NAV_CUBE_SIZE_FULL;
+  let lastStepTime = performance.now();
 
-  function highlightFacesForDirection(dir: THREE.Vector3) {
+  function navCubeShowingFull(): boolean {
+    return navCubeMode === 'full' || (navCubeMode === 'mini' && navCubeHovering);
+  }
+
+  function pointerOverNavCubeRegion(clientX: number, clientY: number): boolean {
+    if (navCubeMode === 'off') return false;
+    const rect = renderer.domElement.getBoundingClientRect();
+    const offsetX = rect.left + container.clientWidth - displaySize - 8;
+    const offsetY = rect.top + container.clientHeight - displaySize - 8;
+    const localX = clientX - offsetX;
+    const localY = clientY - offsetY;
+    return localX >= 0 && localX <= displaySize && localY >= 0 && localY <= displaySize;
+  }
+
+  // Marks whichever face(s) the current view was set from (1 for a face, 2
+  // for an edge, 3 for a corner) with a permanent color — a "this is the
+  // selected orientation" indicator, replaced (not accumulated) by the next
+  // click, rather than a temporary flash.
+  const SELECTED_COLOR = new THREE.Color(0xffcf7a);
+  const NORMAL_COLOR = new THREE.Color(0xffffff);
+  let selectedFaceIndices: number[] = [];
+
+  function selectFacesForDirection(dir: THREE.Vector3) {
+    selectedFaceIndices.forEach((i) => navMaterials[i].color.copy(NORMAL_COLOR));
     const indices: number[] = [];
     if (dir.x > 0) indices.push(0);
     else if (dir.x < 0) indices.push(1);
@@ -286,7 +360,8 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     else if (dir.y < 0) indices.push(3);
     if (dir.z > 0) indices.push(4);
     else if (dir.z < 0) indices.push(5);
-    faceHighlight = { indices, start: performance.now() };
+    indices.forEach((i) => navMaterials[i].color.copy(SELECTED_COLOR));
+    selectedFaceIndices = indices;
   }
 
   function snapToView(dir: THREE.Vector3) {
@@ -310,14 +385,16 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   // the axis actually hit is always exactly at the extreme, and the other
   // two range across the face, close to an edge/corner when out that far.
   function hitTestNavCube(clientX: number, clientY: number): THREE.Vector3 | null {
-    if (!navCubeVisible) return null;
+    // The schematic 'mini' cube (not yet hovered) isn't click-interactive —
+    // only the real labeled cube, shown once "effectively full", is.
+    if (!navCubeShowingFull() || !pointerOverNavCubeRegion(clientX, clientY)) return null;
     const rect = renderer.domElement.getBoundingClientRect();
-    const offsetX = rect.left + container.clientWidth - NAV_CUBE_SIZE - 8;
-    const offsetY = rect.top + container.clientHeight - NAV_CUBE_SIZE - 8;
-    const localX = clientX - offsetX;
-    const localY = clientY - offsetY;
-    if (localX < 0 || localX > NAV_CUBE_SIZE || localY < 0 || localY > NAV_CUBE_SIZE) return null;
-    const ndc = new THREE.Vector2((localX / NAV_CUBE_SIZE) * 2 - 1, -(localY / NAV_CUBE_SIZE) * 2 + 1);
+    const offsetX = rect.left + container.clientWidth - NAV_CUBE_SIZE_FULL - 8;
+    const offsetY = rect.top + container.clientHeight - NAV_CUBE_SIZE_FULL - 8;
+    const ndc = new THREE.Vector2(
+      ((clientX - offsetX) / NAV_CUBE_SIZE_FULL) * 2 - 1,
+      -((clientY - offsetY) / NAV_CUBE_SIZE_FULL) * 2 + 1,
+    );
     raycaster.setFromCamera(ndc, navCamera);
     const hit = raycaster.intersectObject(navCube)[0];
     if (!hit) return null;
@@ -331,14 +408,26 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     return dir.lengthSq() > 0 ? dir.normalize() : null;
   }
 
+  function stepNavCube(dt: number) {
+    if (navCubeMode === 'off') return;
+    const showFull = navCubeShowingFull();
+    navCube.visible = showFull;
+    miniCube.visible = !showFull;
+
+    const target = showFull ? NAV_CUBE_SIZE_FULL : NAV_CUBE_SIZE_MINI;
+    const maxStep = NAV_CUBE_SIZE_ANIM_SPEED * dt;
+    displaySize += THREE.MathUtils.clamp(target - displaySize, -maxStep, maxStep);
+  }
+
   function renderNavCube() {
-    if (!navCubeVisible) return;
+    if (navCubeMode === 'off') return;
     navCube.quaternion.copy(camera.quaternion).invert();
+    miniCube.quaternion.copy(camera.quaternion).invert();
     renderer.getViewport(navViewport);
     renderer.clearDepth();
-    const x = container.clientWidth - NAV_CUBE_SIZE - 8;
+    const x = container.clientWidth - displaySize - 8;
     const y = 8; // viewport y is measured bottom-up, so a small value sits near the bottom
-    renderer.setViewport(x, y, NAV_CUBE_SIZE, NAV_CUBE_SIZE);
+    renderer.setViewport(x, y, displaySize, displaySize);
     renderer.render(navScene, navCamera);
     renderer.setViewport(navViewport.x, navViewport.y, navViewport.z, navViewport.w);
   }
@@ -347,10 +436,14 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   // technique as the nav cube. Purely informational (no click handling) — it
   // rotates to reflect the pane's current orientation, same as the cube.
   const axisGizmo = new THREE.Group();
-  axisGizmo.add(axisArrow(1, 0.05, 0, 0xff4444), axisArrow(1, 0.05, 1, 0x44dd44), axisArrow(1, 0.05, 2, 0x4488ff));
+  axisGizmo.add(
+    axisArrow(1, 0.05, 0, 0xff4444, 'X', '#ff8888'),
+    axisArrow(1, 0.05, 1, 0x44dd44, 'Y', '#88ff88'),
+    axisArrow(1, 0.05, 2, 0x4488ff, 'Z', '#88bbff'),
+  );
   const axisGizmoScene = new THREE.Group();
   axisGizmoScene.add(axisGizmo);
-  const axisGizmoCamera = new THREE.OrthographicCamera(-1.5, 1.5, 1.5, -1.5, 0.1, 10);
+  const axisGizmoCamera = new THREE.OrthographicCamera(-1.8, 1.8, 1.8, -1.8, 0.1, 10);
   axisGizmoCamera.position.set(0, 0, 4);
   axisGizmoCamera.lookAt(0, 0, 0);
 
@@ -518,10 +611,13 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   renderer.domElement.addEventListener('pointermove', (event) => {
     if (event.pointerType !== 'mouse') return;
     stepOrbit(event.clientX, event.clientY);
+    navCubeHovering = pointerOverNavCubeRegion(event.clientX, event.clientY);
     if (!orbit.active && !isPanning) {
-      const hovering = hitTestNavCube(event.clientX, event.clientY) !== null;
-      renderer.domElement.style.cursor = hovering ? 'pointer' : '';
+      renderer.domElement.style.cursor = navCubeHovering && navCubeShowingFull() ? 'pointer' : '';
     }
+  });
+  renderer.domElement.addEventListener('pointerleave', () => {
+    navCubeHovering = false;
   });
   renderer.domElement.addEventListener('pointerup', (event) => {
     if (event.pointerType !== 'mouse') return;
@@ -543,7 +639,7 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
       const dir = hitTestNavCube(event.clientX, event.clientY);
       if (dir) {
         snapToView(dir);
-        highlightFacesForDirection(dir);
+        selectFacesForDirection(dir);
       }
     }
   });
@@ -585,11 +681,10 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
       pivotIndicator.scale.setScalar(scale);
     }
 
-    if (faceHighlight) {
-      const t = Math.min(1, (performance.now() - faceHighlight.start) / HIGHLIGHT_MS);
-      faceHighlight.indices.forEach((i) => navMaterials[i].color.lerpColors(HIGHLIGHT_COLOR, NORMAL_COLOR, t));
-      if (t === 1) faceHighlight = null;
-    }
+    const now = performance.now();
+    const dt = (now - lastStepTime) / 1000;
+    lastStepTime = now;
+    stepNavCube(dt);
 
     controls.update();
     renderer.clear();
@@ -607,9 +702,16 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
       material.dispose();
     });
     navCube.geometry.dispose();
+    miniCubeGeometry.dispose();
+    (miniCube.material as THREE.Material).dispose();
+    miniCubeEdges.geometry.dispose();
+    (miniCubeEdges.material as THREE.Material).dispose();
     axisGizmo.traverse((child) => {
       if (child instanceof THREE.Mesh) {
         child.geometry.dispose();
+        child.material.dispose();
+      } else if (child instanceof THREE.Sprite) {
+        child.material.map?.dispose();
         child.material.dispose();
       }
     });
@@ -697,10 +799,18 @@ splitViewBtn.addEventListener('click', () => {
   panes.forEach((pane) => pane.resize());
 });
 
+// Cycles full -> mini -> off -> full. The tooltip always names what the
+// NEXT click will do, matching the other toggle buttons' convention.
+const NAV_CUBE_NEXT_MODE: Record<NavCubeMode, NavCubeMode> = { full: 'mini', mini: 'off', off: 'full' };
+const NAV_CUBE_NEXT_LABEL: Record<NavCubeMode, string> = {
+  full: 'Minimize navigation cube',
+  mini: 'Hide navigation cube',
+  off: 'Show navigation cube',
+};
 navCubeBtn.addEventListener('click', () => {
-  navCubeVisible = !navCubeVisible;
-  navCubeBtn.classList.toggle('active', navCubeVisible);
-  const label = navCubeVisible ? 'Hide navigation cube' : 'Show navigation cube';
+  navCubeMode = NAV_CUBE_NEXT_MODE[navCubeMode];
+  navCubeBtn.classList.toggle('active', navCubeMode !== 'off');
+  const label = NAV_CUBE_NEXT_LABEL[navCubeMode];
   navCubeBtn.querySelector('.tooltip')!.textContent = label;
   navCubeBtn.setAttribute('aria-label', label);
 });
