@@ -88,7 +88,7 @@ function makeAxisLabelSprite(text: string, color: string): THREE.Sprite {
   texture.colorSpace = THREE.SRGBColorSpace;
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, depthTest: false, transparent: true }));
   sprite.renderOrder = 1000;
-  sprite.scale.set(0.4, 0.4, 1);
+  sprite.scale.set(0.8, 0.8, 1);
   return sprite;
 }
 
@@ -343,25 +343,58 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     return localX >= 0 && localX <= displaySize && localY >= 0 && localY <= displaySize;
   }
 
-  // Marks whichever face(s) the current view was set from (1 for a face, 2
-  // for an edge, 3 for a corner) with a permanent color — a "this is the
-  // selected orientation" indicator, replaced (not accumulated) by the next
-  // click, rather than a temporary flash.
-  const SELECTED_COLOR = new THREE.Color(0xffcf7a);
-  const NORMAL_COLOR = new THREE.Color(0xffffff);
-  let selectedFaceIndices: number[] = [];
+  // Marks exactly the clicked zone(s) — the one cell for a face click, the
+  // edge-mid cell on each of the two faces for an edge, the corner cell on
+  // each of the three faces for a corner — with a thin colored patch flush
+  // against the cube surface, replaced (not accumulated) by the next click.
+  // Built from the same NAV_CUBE_HALF/NAV_EDGE_FRACTION geometry hitTestNavCube
+  // uses, so the highlighted region always matches the actual zone boundaries.
+  const SELECTED_COLOR = 0x4a9eff; // the box's own blue, not an unrelated accent
+  let selectionPatches: THREE.Mesh[] = [];
 
   function selectFacesForDirection(dir: THREE.Vector3) {
-    selectedFaceIndices.forEach((i) => navMaterials[i].color.copy(NORMAL_COLOR));
-    const indices: number[] = [];
-    if (dir.x > 0) indices.push(0);
-    else if (dir.x < 0) indices.push(1);
-    if (dir.y > 0) indices.push(2);
-    else if (dir.y < 0) indices.push(3);
-    if (dir.z > 0) indices.push(4);
-    else if (dir.z < 0) indices.push(5);
-    indices.forEach((i) => navMaterials[i].color.copy(SELECTED_COLOR));
-    selectedFaceIndices = indices;
+    selectionPatches.forEach((patch) => {
+      navCube.remove(patch);
+      patch.geometry.dispose();
+      (patch.material as THREE.Material).dispose();
+    });
+    selectionPatches = [];
+
+    const half = NAV_CUBE_HALF;
+    const threshold = half * NAV_EDGE_FRACTION;
+    const bandCenter = (half + threshold) / 2;
+    const bandWidth = half - threshold;
+    const fullWidth = threshold * 2;
+    const flush = 0.01;
+
+    const axes: { key: 'x' | 'y' | 'z'; sign: number }[] = [
+      { key: 'x', sign: dir.x },
+      { key: 'y', sign: dir.y },
+      { key: 'z', sign: dir.z },
+    ];
+
+    for (const primary of axes) {
+      if (primary.sign === 0) continue;
+      const size = new THREE.Vector3(fullWidth, fullWidth, fullWidth);
+      const center = new THREE.Vector3(0, 0, 0);
+      center[primary.key] = primary.sign * (half + flush / 2);
+      size[primary.key] = flush;
+
+      for (const other of axes) {
+        if (other.key === primary.key || other.sign === 0) continue;
+        center[other.key] = other.sign * bandCenter;
+        size[other.key] = bandWidth;
+      }
+
+      const patch = new THREE.Mesh(
+        new THREE.BoxGeometry(size.x, size.y, size.z),
+        new THREE.MeshBasicMaterial({ color: SELECTED_COLOR, transparent: true, opacity: 0.55, depthTest: false }),
+      );
+      patch.position.copy(center);
+      patch.renderOrder = 1000;
+      navCube.add(patch);
+      selectionPatches.push(patch);
+    }
   }
 
   function snapToView(dir: THREE.Vector3) {
@@ -702,6 +735,10 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
       material.dispose();
     });
     navCube.geometry.dispose();
+    selectionPatches.forEach((patch) => {
+      patch.geometry.dispose();
+      (patch.material as THREE.Material).dispose();
+    });
     miniCubeGeometry.dispose();
     (miniCube.material as THREE.Material).dispose();
     miniCubeEdges.geometry.dispose();
