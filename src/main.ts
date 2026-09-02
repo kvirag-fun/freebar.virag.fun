@@ -36,16 +36,20 @@ scene.add(keyLight);
 const grid = new THREE.GridHelper(10, 10, 0x444444, 0x2a2a2a);
 scene.add(grid);
 
-// Axes helper: red = X, green = Y, blue = Z
-scene.add(new THREE.AxesHelper(3));
+// World axes helper, colored per this project's direction convention (see
+// axisArrow below): world Z reads as "X"/red, world X as "Y"/green, world Y
+// (up) as "Z"/blue. THREE.AxesHelper bakes in the opposite (literal X=red/
+// Y=green/Z=blue) convention, so this is a small hand-built equivalent instead.
+scene.add(worldAxesHelper(3));
 
 // Actual scene content (as opposed to helpers like the grid/axes above) lives
 // in this group, so "zoom to fit" can frame it without including the grid.
 const content = new THREE.Group();
 scene.add(content);
 
-// Placeholder bar/box with distinct X/Y/Z dimensions so orientation is unambiguous:
-// width (X) = 1, height (Y) = 2, depth (Z) = 3
+// Placeholder bar/box with distinct dimensions along every axis so orientation
+// is unambiguous: width (world X, shown as "Y") = 1, height (world Y/up,
+// shown as "Z") = 2, depth (world Z, shown as "X") = 3
 const box = new THREE.Mesh(
   new THREE.BoxGeometry(1, 2, 3),
   new THREE.MeshStandardMaterial({ color: 0x4a9eff, metalness: 0.1, roughness: 0.6 }),
@@ -67,6 +71,24 @@ function axisRod(length: number, thickness: number, axis: 0 | 1 | 2, color: numb
   );
   rod.renderOrder = 999;
   return rod;
+}
+
+// A minimal THREE.AxesHelper equivalent, but colored per this project's
+// direction convention instead of AxesHelper's built-in X=red/Y=green/Z=blue.
+function worldAxesHelper(length: number): THREE.Group {
+  const group = new THREE.Group();
+  const axes: { axis: 0 | 1 | 2; color: number }[] = [
+    { axis: 0, color: 0x44dd44 }, // world X, shown as "Y" (green)
+    { axis: 1, color: 0x4488ff }, // world Y (up), shown as "Z" (blue)
+    { axis: 2, color: 0xff4444 }, // world Z, shown as "X" (red)
+  ];
+  for (const { axis, color } of axes) {
+    const end = new THREE.Vector3();
+    end.setComponent(axis, length);
+    const geometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), end]);
+    group.add(new THREE.Line(geometry, new THREE.LineBasicMaterial({ color })));
+  }
+  return group;
 }
 
 function easeOutCubic(t: number) {
@@ -119,6 +141,40 @@ function axisArrow(length: number, thickness: number, axis: 0 | 1 | 2, color: nu
   if (axis === 0) group.rotation.z = -Math.PI / 2; // +Y -> +X
   else if (axis === 2) group.rotation.x = Math.PI / 2; // +Y -> +Z
   return group;
+}
+
+// Shortest-arc rotation that carries `from` onto `to` — used to reorient the
+// camera by the smallest possible turn, rather than via OrbitControls' own
+// lookAt() (see stableOrientationTowards below for why).
+function quaternionBetween(from: THREE.Vector3, to: THREE.Vector3): THREE.Quaternion {
+  const f = from.clone().normalize();
+  const t = to.clone().normalize();
+  const dot = THREE.MathUtils.clamp(f.dot(t), -1, 1);
+  if (dot > 1 - 1e-6) return new THREE.Quaternion();
+  if (dot < -1 + 1e-6) {
+    let axis = new THREE.Vector3(0, 1, 0).cross(f);
+    if (axis.lengthSq() < 1e-6) axis = new THREE.Vector3(1, 0, 0).cross(f);
+    return new THREE.Quaternion().setFromAxisAngle(axis.normalize(), Math.PI);
+  }
+  const axis = f.clone().cross(t).normalize();
+  return new THREE.Quaternion().setFromAxisAngle(axis, Math.acos(dot));
+}
+
+// OrbitControls.update() reorients the camera every frame via lookAt(camera
+// position, target, world-up) — fine everywhere except when the camera's
+// forward direction is this close to parallel with world-up: the up×forward
+// cross product it needs to define "right" collapses toward zero there, and
+// Three.js's fallback (nudging the forward vector by a fixed epsilon) picks
+// an arbitrary, discontinuous roll rather than continuing whatever roll the
+// view already had. That's what made rotating, or tweening, to an exactly
+// vertical view feel like a sudden snap instead of a smooth approach. Reusing
+// the previous frame's (still-valid) orientation and applying only the
+// smallest rotation needed to reach the new forward direction keeps the roll
+// continuous through the approach and while parked there, however
+// controls.update() got to that forward (tween, pan, zoom, or idle).
+function stableOrientationTowards(prevQuat: THREE.Quaternion, newForward: THREE.Vector3): THREE.Quaternion {
+  const prevForward = new THREE.Vector3(0, 0, -1).applyQuaternion(prevQuat);
+  return quaternionBetween(prevForward, newForward).multiply(prevQuat);
 }
 
 const raycaster = new THREE.Raycaster();
@@ -242,17 +298,20 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
 
   // Pivot indicator: a 3D crosshair shown at the rotation pivot only when the
   // gesture actually started on real content (not the bounding-box
-  // fallback). Its three arms stay parallel to the world X/Y/Z axes
-  // (matching the AxesHelper's red/green/blue convention) rather than
-  // billboarding toward the camera — it's a point in space, not a
-  // screen-facing icon. It scales with camera distance so it reads as a
+  // fallback). Its three arms stay parallel to the world axes (colored per
+  // this project's X=red/Y=green/Z=blue convention, see worldAxesHelper)
+  // rather than billboarding toward the camera — it's a point in space, not
+  // a screen-facing icon. It scales with camera distance so it reads as a
   // roughly constant on-screen size.
   const pivotIndicator = new THREE.Group();
-  pivotIndicator.add(axisRod(2, 0.08, 0, 0xff4444), axisRod(2, 0.08, 1, 0x44dd44), axisRod(2, 0.08, 2, 0x4488ff));
+  pivotIndicator.add(axisRod(2, 0.08, 0, 0x44dd44), axisRod(2, 0.08, 1, 0x4488ff), axisRod(2, 0.08, 2, 0xff4444));
   pivotIndicator.visible = false;
   scene.add(pivotIndicator);
 
   let tween: Tween | null = null;
+  // Tracked every frame (see step()) so stableOrientationTowards always has
+  // a continuous basis to rotate from when the camera nears a pole.
+  let lastStableQuat = camera.quaternion.clone();
 
   function zoomToFit() {
     const center = contentBoundsCenter();
@@ -734,9 +793,15 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
 
     controls.update();
 
+    const forward = new THREE.Vector3();
+    camera.getWorldDirection(forward);
+    const angleToUp = forward.angleTo(WORLD_UP);
+    if (angleToUp <= POLE_EPS || angleToUp >= Math.PI - POLE_EPS) {
+      camera.quaternion.copy(stableOrientationTowards(lastStableQuat, forward));
+    }
+    lastStableQuat.copy(camera.quaternion);
+
     if (selectedDir && !tween) {
-      const forward = new THREE.Vector3();
-      camera.getWorldDirection(forward);
       if (forward.angleTo(selectedDir.clone().negate()) > SELECTION_CLEAR_ANGLE) clearSelection();
     }
 
