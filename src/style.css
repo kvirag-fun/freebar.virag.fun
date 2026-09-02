@@ -55,6 +55,7 @@ html, body {
 }
 
 .pane-resizer {
+  position: relative;
   flex: 0 0 6px;
   background: rgba(255, 255, 255, 0.15);
   cursor: col-resize;
@@ -64,6 +65,31 @@ html, body {
 .pane-resizer:hover,
 .pane-resizer.dragging {
   background: rgba(255, 255, 255, 0.35);
+}
+
+/* Three stacked dots, centered on the divider, hint that it's draggable. */
+.pane-resizer::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.5);
+  box-shadow:
+    0 -6px rgba(255, 255, 255, 0.5),
+    0 6px rgba(255, 255, 255, 0.5);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.pane-resizer:hover::after,
+.pane-resizer.dragging::after {
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow:
+    0 -6px rgba(255, 255, 255, 0.85),
+    0 6px rgba(255, 255, 255, 0.85);
 }
 
 .pane canvas {
