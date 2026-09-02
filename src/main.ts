@@ -350,15 +350,25 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   // Built from the same NAV_CUBE_HALF/NAV_EDGE_FRACTION geometry hitTestNavCube
   // uses, so the highlighted region always matches the actual zone boundaries.
   const SELECTED_COLOR = 0x4a9eff; // the box's own blue, not an unrelated accent
+  // Once the user rotates the view away from the direction that was clicked,
+  // the highlight no longer describes the current view, so it's dropped.
+  const SELECTION_CLEAR_ANGLE = THREE.MathUtils.degToRad(1.5);
   let selectionPatches: THREE.Mesh[] = [];
+  let selectedDir: THREE.Vector3 | null = null;
 
-  function selectFacesForDirection(dir: THREE.Vector3) {
+  function clearSelection() {
     selectionPatches.forEach((patch) => {
       navCube.remove(patch);
       patch.geometry.dispose();
       (patch.material as THREE.Material).dispose();
     });
     selectionPatches = [];
+    selectedDir = null;
+  }
+
+  function selectFacesForDirection(dir: THREE.Vector3) {
+    clearSelection();
+    selectedDir = dir.clone();
 
     const half = NAV_CUBE_HALF;
     const threshold = half * NAV_EDGE_FRACTION;
@@ -367,10 +377,13 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     const fullWidth = threshold * 2;
     const flush = 0.01;
 
+    // dir arrives normalized (edge/corner directions have fractional
+    // per-axis magnitude, e.g. 0.577 for a corner), but patch placement
+    // needs the pure ±1 sign of each axis, not its normalized length.
     const axes: { key: 'x' | 'y' | 'z'; sign: number }[] = [
-      { key: 'x', sign: dir.x },
-      { key: 'y', sign: dir.y },
-      { key: 'z', sign: dir.z },
+      { key: 'x', sign: Math.sign(dir.x) },
+      { key: 'y', sign: Math.sign(dir.y) },
+      { key: 'z', sign: Math.sign(dir.z) },
     ];
 
     for (const primary of axes) {
@@ -720,6 +733,13 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     stepNavCube(dt);
 
     controls.update();
+
+    if (selectedDir && !tween) {
+      const forward = new THREE.Vector3();
+      camera.getWorldDirection(forward);
+      if (forward.angleTo(selectedDir.clone().negate()) > SELECTION_CLEAR_ANGLE) clearSelection();
+    }
+
     renderer.clear();
     renderer.render(scene, camera);
     renderNavCube();
