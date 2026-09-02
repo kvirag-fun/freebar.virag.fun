@@ -162,6 +162,17 @@ function trianglePlaneIntersection(
   return points.length === 2 ? [points[0], points[1]] : null;
 }
 
+// Nudges a point that sits exactly on the clipping plane slightly onto the
+// kept side, in world units. The highlight traces that exact boundary, but
+// the renderer's own clip-plane discard test evaluates each vertex against
+// the SAME plane it lies on — floating-point rounding in that (view-matrix-
+// dependent) computation then flips individual fragments to the discarded
+// side essentially at random as the camera moves, since there's no margin
+// either way. depthTest:false on the highlight material only guards against
+// the unrelated depth-buffer kind of z-fighting; this is what actually stops
+// the line flickering in and out while rotating.
+const CUT_HIGHLIGHT_OFFSET = 0.001;
+
 // Every line segment where `plane` crosses `mesh`'s surface, in world space
 // — walks every triangle once, testing it against trianglePlaneIntersection.
 // Works for any triangle mesh (not just the placeholder box), so it keeps
@@ -186,7 +197,11 @@ function meshPlaneIntersectionSegments(mesh: THREE.Mesh, plane: THREE.Plane): TH
     vC.fromBufferAttribute(positions, ic).applyMatrix4(mesh.matrixWorld);
 
     const segment = trianglePlaneIntersection(vA, plane.distanceToPoint(vA), vB, plane.distanceToPoint(vB), vC, plane.distanceToPoint(vC));
-    if (segment) segments.push(segment[0], segment[1]);
+    if (segment) {
+      segment[0].addScaledVector(plane.normal, CUT_HIGHLIGHT_OFFSET);
+      segment[1].addScaledVector(plane.normal, CUT_HIGHLIGHT_OFFSET);
+      segments.push(segment[0], segment[1]);
+    }
   }
   return segments;
 }
