@@ -177,6 +177,24 @@ function stableOrientationTowards(prevQuat: THREE.Quaternion, newForward: THREE.
   return quaternionBetween(prevForward, newForward).multiply(prevQuat);
 }
 
+// The exact same "zero roll, up-locked" orientation OrbitControls.update()'s
+// lookAt() computes for a given forward direction — safe to use directly
+// here since the caller only ever calls this away from the near-parallel-to-up
+// zone where that computation is unstable. Used so a snapToView tween's
+// destination orientation matches, bit-for-bit, whatever lookAt() will derive
+// once the tween ends and hands orientation back to it — otherwise the two
+// could disagree on roll (schemes-based-on-continuity have no reason to land
+// on the same "canonical" roll lookAt() would pick) and the hand-off itself
+// would be a visible snap, just moved to the end of the tween instead of
+// happening mid-flight.
+function canonicalOrientation(forward: THREE.Vector3, up: THREE.Vector3): THREE.Quaternion {
+  const z = forward.clone().negate().normalize();
+  const x = new THREE.Vector3().crossVectors(up, z).normalize();
+  const y = new THREE.Vector3().crossVectors(z, x);
+  const m = new THREE.Matrix4().makeBasis(x, y, z);
+  return new THREE.Quaternion().setFromRotationMatrix(m);
+}
+
 const raycaster = new THREE.Raycaster();
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 const ROTATE_SPEED = 0.5;
@@ -255,7 +273,19 @@ function makeNavFaceTexture(label: string): THREE.CanvasTexture {
   return texture;
 }
 
-type Tween = { fromPos: THREE.Vector3; toPos: THREE.Vector3; fromTarget: THREE.Vector3; toTarget: THREE.Vector3; start: number };
+type Tween = {
+  fromPos: THREE.Vector3;
+  toPos: THREE.Vector3;
+  fromTarget: THREE.Vector3;
+  toTarget: THREE.Vector3;
+  // Set only by snapToView, since that's the only tween that changes viewing
+  // direction (zoomToFit keeps it fixed) — see snapToView for why orientation
+  // needs its own explicit, continuity-preserving interpolation instead of
+  // being left for OrbitControls' lookAt() to derive each frame.
+  fromQuat?: THREE.Quaternion;
+  toQuat?: THREE.Quaternion;
+  start: number;
+};
 
 type PaneSeed = { position: THREE.Vector3; quaternion: THREE.Quaternion; target: THREE.Vector3 };
 
@@ -472,11 +502,42 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   function snapToView(dir: THREE.Vector3) {
     const center = contentBoundsCenter() ?? controls.target.clone();
     const distance = camera.position.distanceTo(controls.target);
+    const toPos = center.clone().add(dir.clone().multiplyScalar(distance));
+
+    // Orientation is tweened explicitly (rather than left for OrbitControls'
+    // per-frame lookAt() to derive from the lerped position/target) because
+    // lookAt()'s roll becomes numerically unstable within several degrees of
+    // vertical: composing it frame-by-frame with the near-pole correction in
+    // step() meant the correction was "on" for the first frame or two (still
+    // near the previous, unrelated pole-parked roll) and then handed off to
+    // raw lookAt() once forward tilted just past POLE_EPS — and that raw
+    // roll, computed from a near-zero up×forward cross product, has no
+    // relation to the roll the correction was just holding, so the hand-off
+    // itself was a visible snap. Computing a single fromQuat/toQuat up front
+    // and slerping across the whole tween sidesteps lookAt() entirely for
+    // its duration, so there's no boundary left to snap across.
+    const fromForward = new THREE.Vector3();
+    camera.getWorldDirection(fromForward);
+    const toForward = center.clone().sub(toPos).normalize();
+    const fromQuat = camera.quaternion.clone();
+    // The destination orientation must match what lookAt() will derive once
+    // the tween ends and hands orientation back to it (see canonicalOrientation)
+    // — true for every direction except exactly TOP/BOTTOM, where that's the
+    // undefined case this whole scheme exists to avoid; there, continuity
+    // from the current orientation is the only sensible definition of "roll".
+    const toAngleToUp = toForward.angleTo(WORLD_UP);
+    const toQuat =
+      toAngleToUp <= POLE_EPS || toAngleToUp >= Math.PI - POLE_EPS
+        ? quaternionBetween(fromForward, toForward).multiply(fromQuat.clone())
+        : canonicalOrientation(toForward, WORLD_UP);
+
     tween = {
       fromPos: camera.position.clone(),
-      toPos: center.clone().add(dir.clone().multiplyScalar(distance)),
+      toPos,
       fromTarget: controls.target.clone(),
       toTarget: center,
+      fromQuat,
+      toQuat,
       start: performance.now(),
     };
   }
@@ -773,11 +834,20 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   }
 
   function step() {
+    // Set only while a snapToView tween is both active and driving
+    // orientation (see snapToView) — holds the slerped quaternion for this
+    // frame so it can be (re-)applied after controls.update() below, since
+    // that call would otherwise overwrite it via its own lookAt().
+    let tweenQuat: THREE.Quaternion | null = null;
+
     if (tween) {
       const t = Math.min(1, (performance.now() - tween.start) / TWEEN_MS);
       const e = easeOutCubic(t);
       camera.position.lerpVectors(tween.fromPos, tween.toPos, e);
       controls.target.lerpVectors(tween.fromTarget, tween.toTarget, e);
+      if (tween.fromQuat && tween.toQuat) {
+        tweenQuat = new THREE.Quaternion().slerpQuaternions(tween.fromQuat, tween.toQuat, e);
+      }
       if (t === 1) tween = null;
     }
 
@@ -793,15 +863,29 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
 
     controls.update();
 
-    const forward = new THREE.Vector3();
-    camera.getWorldDirection(forward);
-    const angleToUp = forward.angleTo(WORLD_UP);
-    if (angleToUp <= POLE_EPS || angleToUp >= Math.PI - POLE_EPS) {
-      camera.quaternion.copy(stableOrientationTowards(lastStableQuat, forward));
+    if (tweenQuat) {
+      // A snapToView tween is mid-flight: its own slerp already owns
+      // orientation for this frame, so the lookAt() controls.update() just
+      // ran is discarded rather than left to fight it near a pole.
+      camera.quaternion.copy(tweenQuat);
+    } else {
+      // Otherwise (idle, panning, zooming, or mid-drag) trust controls.update()'s
+      // lookAt() — except within a couple of degrees of vertical, where its
+      // roll becomes numerically unstable (see stableOrientationTowards):
+      // reconstruct orientation there as the smallest turn from the last
+      // frame's (still-good) orientation instead.
+      const rawForward = new THREE.Vector3();
+      camera.getWorldDirection(rawForward);
+      const angleToUp = rawForward.angleTo(WORLD_UP);
+      if (angleToUp <= POLE_EPS || angleToUp >= Math.PI - POLE_EPS) {
+        camera.quaternion.copy(stableOrientationTowards(lastStableQuat, rawForward));
+      }
     }
     lastStableQuat.copy(camera.quaternion);
 
     if (selectedDir && !tween) {
+      const forward = new THREE.Vector3();
+      camera.getWorldDirection(forward);
       if (forward.angleTo(selectedDir.clone().negate()) > SELECTION_CLEAR_ANGLE) clearSelection();
     }
 
