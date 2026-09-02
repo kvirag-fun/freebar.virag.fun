@@ -1759,9 +1759,9 @@ function renderClipPlaneList() {
     <li class="clip-plane-row" data-id="${p.id}">
       <input type="text" class="clip-plane-name" value="${escapeHtml(p.name)}" aria-label="Plane name" />
       <span class="clip-plane-axis-btns">
-        <button type="button" data-axis="x" class="${activeClass('x')}" title="Align to X axis">X</button>
-        <button type="button" data-axis="y" class="${activeClass('y')}" title="Align to Y axis">Y</button>
-        <button type="button" data-axis="z" class="${activeClass('z')}" title="Align to Z axis">Z</button>
+        <button type="button" data-axis="x" class="${activeClass('x')}" title="Align to the ZY plane (normal along X)">ZY</button>
+        <button type="button" data-axis="y" class="${activeClass('y')}" title="Align to the XZ plane (normal along Y)">XZ</button>
+        <button type="button" data-axis="z" class="${activeClass('z')}" title="Align to the XY plane (normal along Z)">XY</button>
         <button type="button" data-axis="custom" class="${activeClass('custom')}" title="Custom orientation (as originally placed)">&ang;</button>
         <button type="button" data-axis="flip" title="Flip which side is kept">&#8645;</button>
       </span>
