@@ -275,6 +275,49 @@ function meshPlaneIntersectionSegments(mesh: THREE.Mesh, plane: THREE.Plane): TH
   return segments;
 }
 
+// A plane placed by clicking directly on a flat face is now oriented to
+// match that face exactly (see placeClipPlaneAt) - so its "cut" doesn't
+// slice through anything, it lies flush with a whole face. Clipping by such
+// a plane is a no-op (or, normal-flipped, discards the entire mesh), but
+// either way that flush face sits exactly on the clip boundary, where
+// floating-point rounding in the renderer's per-fragment distance test
+// flickers it in and out the same way an un-nudged cut highlight would (see
+// CUT_HIGHLIGHT_OFFSET above) - with no cut to show for the trouble. This
+// walks every triangle looking for one entirely coincident with `plane`
+// (all three vertices within PLANE_FACE_COINCIDENCE_EPS of it) so callers
+// can skip clipping by such a plane entirely instead.
+const PLANE_FACE_COINCIDENCE_EPS = 1e-6;
+function planeCoincidesWithAFace(root: THREE.Object3D, plane: THREE.Plane): boolean {
+  const vA = new THREE.Vector3();
+  const vB = new THREE.Vector3();
+  const vC = new THREE.Vector3();
+  let coincides = false;
+  root.traverse((child) => {
+    if (coincides || !(child instanceof THREE.Mesh)) return;
+    const geometry = child.geometry;
+    const positions = geometry.getAttribute('position');
+    const index = geometry.index;
+    const triCount = (index ? index.count : positions.count) / 3;
+    for (let t = 0; t < triCount; t++) {
+      const ia = index ? index.getX(t * 3) : t * 3;
+      const ib = index ? index.getX(t * 3 + 1) : t * 3 + 1;
+      const ic = index ? index.getX(t * 3 + 2) : t * 3 + 2;
+      vA.fromBufferAttribute(positions, ia).applyMatrix4(child.matrixWorld);
+      vB.fromBufferAttribute(positions, ib).applyMatrix4(child.matrixWorld);
+      vC.fromBufferAttribute(positions, ic).applyMatrix4(child.matrixWorld);
+      if (
+        Math.abs(plane.distanceToPoint(vA)) < PLANE_FACE_COINCIDENCE_EPS &&
+        Math.abs(plane.distanceToPoint(vB)) < PLANE_FACE_COINCIDENCE_EPS &&
+        Math.abs(plane.distanceToPoint(vC)) < PLANE_FACE_COINCIDENCE_EPS
+      ) {
+        coincides = true;
+        return;
+      }
+    }
+  });
+  return coincides;
+}
+
 // Rebuilds one pane's cut-edge highlight geometry from every Mesh under
 // `content`, against whichever plane that pane currently has selected — call
 // whenever a pane's selection changes, or the selected plane's point/normal
@@ -571,7 +614,9 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
 
   function applyClipSelection() {
     const def = clipPlanes.find((p) => p.id === selectedClipPlaneId) ?? null;
-    selectedClipPlane = def ? def.plane : null;
+    // Hide (skip clipping by) a plane that's flush with a whole face rather
+    // than actually cutting through the model — see planeCoincidesWithAFace.
+    selectedClipPlane = def && !planeCoincidesWithAFace(content, def.plane) ? def.plane : null;
     updateCutEdgeHighlight(cutEdgeHighlight, selectedClipPlane);
   }
   applyClipSelection();
