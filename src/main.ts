@@ -121,12 +121,17 @@ box.add(boxEdges);
 // highlight — createCutEdgeHighlight assigns it an exclusive THREE.Layers
 // bit that only that pane's camera enables, so the shared `scene` can hold
 // every pane's highlight without them leaking into each other's render.
+// depthTest stays on (like boxEdges' solid line) so a highlighted segment
+// that's actually behind other geometry from the current angle is properly
+// hidden, not drawn through it — CUT_HIGHLIGHT_OFFSET nudging every point
+// slightly toward the camera is what keeps it winning the depth tie against
+// the exactly-coplanar cut face specifically, without needing depthTest off.
 let nextClipHighlightLayer = 1; // layer 0 stays reserved for ordinary shared content
 function createCutEdgeHighlight(): { object: THREE.LineSegments; layer: number } {
   const layer = nextClipHighlightLayer++;
   const object = new THREE.LineSegments(
     new THREE.BufferGeometry(),
-    new THREE.LineDashedMaterial({ color: 0xffffff, dashSize: 0.08, gapSize: 0.06, depthTest: false, transparent: true }),
+    new THREE.LineDashedMaterial({ color: 0xffffff, dashSize: 0.08, gapSize: 0.06, transparent: true }),
   );
   object.renderOrder = 999;
   object.visible = false;
@@ -163,14 +168,18 @@ function trianglePlaneIntersection(
 }
 
 // Nudges a point that sits exactly on the clipping plane slightly onto the
-// kept side, in world units. The highlight traces that exact boundary, but
-// the renderer's own clip-plane discard test evaluates each vertex against
-// the SAME plane it lies on — floating-point rounding in that (view-matrix-
-// dependent) computation then flips individual fragments to the discarded
-// side essentially at random as the camera moves, since there's no margin
-// either way. depthTest:false on the highlight material only guards against
-// the unrelated depth-buffer kind of z-fighting; this is what actually stops
-// the line flickering in and out while rotating.
+// kept (camera-facing) side, in world units. The highlight traces that exact
+// boundary, but the renderer's own clip-plane discard test evaluates each
+// vertex against the SAME plane it lies on — floating-point rounding in that
+// (view-matrix-dependent) computation would otherwise flip individual
+// fragments to the discarded side essentially at random as the camera moves,
+// with no margin either way. This same nudge doubles as the fix for the
+// ordinary depth-buffer kind of z-fighting against the exactly-coplanar cut
+// face: since it moves every point slightly toward the camera, depthTest can
+// stay on (so the highlight is still properly hidden behind other, actually-
+// occluding geometry, like boxEdges' solid line already is) while this small
+// a head start is enough to consistently win the depth tie against that one
+// coplanar face specifically.
 const CUT_HIGHLIGHT_OFFSET = 0.001;
 
 // Every line segment where `plane` crosses `mesh`'s surface, in world space
