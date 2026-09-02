@@ -81,14 +81,8 @@ const PIVOT_INDICATOR_SCALE = 0.035; // fraction of camera distance
 // order these labels and directions are listed in below.
 const NAV_CUBE_SIZE = 180; // px, corner overlay size
 const NAV_LABELS = ['RIGHT', 'LEFT', 'TOP', 'BOTTOM', 'FRONT', 'BACK'];
-const NAV_DIRECTIONS = [
-  new THREE.Vector3(1, 0, 0),
-  new THREE.Vector3(-1, 0, 0),
-  new THREE.Vector3(0, 1, 0),
-  new THREE.Vector3(0, -1, 0),
-  new THREE.Vector3(0, 0, 1),
-  new THREE.Vector3(0, 0, -1),
-];
+const NAV_CUBE_HALF = 0.7; // half-extent of the 1.4-unit BoxGeometry below
+const NAV_EDGE_FRACTION = 0.5; // beyond this fraction of the half-extent, an axis counts as "near that edge" too
 
 function makeNavFaceTexture(label: string): THREE.CanvasTexture {
   // Rendered well above the face's typical on-screen size (the cube can
@@ -219,20 +213,27 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   navCamera.lookAt(0, 0, 0);
   const navViewport = new THREE.Vector4();
 
-  function snapToView(materialIndex: number) {
-    const dir = NAV_DIRECTIONS[materialIndex];
-    if (!dir) return;
+  function snapToView(dir: THREE.Vector3) {
+    const center = contentBoundsCenter() ?? controls.target.clone();
     const distance = camera.position.distanceTo(controls.target);
     tween = {
       fromPos: camera.position.clone(),
-      toPos: controls.target.clone().add(dir.clone().multiplyScalar(distance)),
+      toPos: center.clone().add(dir.clone().multiplyScalar(distance)),
       fromTarget: controls.target.clone(),
-      toTarget: controls.target.clone(),
+      toTarget: center,
       start: performance.now(),
     };
   }
 
-  function hitTestNavCube(clientX: number, clientY: number): number | null {
+  // Faces, edges, and corners are all clickable, matching how CAD nav cubes
+  // work — an edge gives a combined 2-axis view (e.g. TOP+RIGHT), a corner a
+  // combined 3-axis view. Rather than modeling 26 separate face/edge/corner
+  // pieces, this stays a plain 6-face box: a hit is turned into up to three
+  // axis directions by checking, in the cube's own local space (undoing its
+  // current billboard rotation), which coordinates sit out near an edge —
+  // the axis actually hit is always exactly at the extreme, and the other
+  // two range across the face, close to an edge/corner when out that far.
+  function hitTestNavCube(clientX: number, clientY: number): THREE.Vector3 | null {
     if (!navCubeVisible) return null;
     const rect = renderer.domElement.getBoundingClientRect();
     const offsetX = rect.left + container.clientWidth - NAV_CUBE_SIZE - 8;
@@ -243,7 +244,15 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     const ndc = new THREE.Vector2((localX / NAV_CUBE_SIZE) * 2 - 1, -(localY / NAV_CUBE_SIZE) * 2 + 1);
     raycaster.setFromCamera(ndc, navCamera);
     const hit = raycaster.intersectObject(navCube)[0];
-    return hit?.face ? hit.face.materialIndex : null;
+    if (!hit) return null;
+
+    const local = navCube.worldToLocal(hit.point.clone());
+    const threshold = NAV_CUBE_HALF * NAV_EDGE_FRACTION;
+    const dir = new THREE.Vector3();
+    if (Math.abs(local.x) > threshold) dir.x = Math.sign(local.x);
+    if (Math.abs(local.y) > threshold) dir.y = Math.sign(local.y);
+    if (Math.abs(local.z) > threshold) dir.z = Math.sign(local.z);
+    return dir.lengthSq() > 0 ? dir.normalize() : null;
   }
 
   function renderNavCube() {
@@ -434,8 +443,8 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
         lastMiddleClick = { time: now, x: event.clientX, y: event.clientY };
       }
     } else if (event.button === 0) {
-      const materialIndex = hitTestNavCube(event.clientX, event.clientY);
-      if (materialIndex !== null) snapToView(materialIndex);
+      const dir = hitTestNavCube(event.clientX, event.clientY);
+      if (dir) snapToView(dir);
     }
   });
 
@@ -498,7 +507,7 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     return { position: camera.position.clone(), quaternion: camera.quaternion.clone(), target: controls.target.clone() };
   }
 
-  return { container, camera, controls, resize, step, dispose, currentSeed, snapToView };
+  return { container, camera, controls, resize, step, dispose, currentSeed, snapToView, hitTestNavCube };
 }
 
 type Pane = ReturnType<typeof createPane>;
