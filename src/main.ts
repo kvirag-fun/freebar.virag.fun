@@ -483,9 +483,9 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   // rotates to reflect the pane's current orientation, same as the cube.
   const axisGizmo = new THREE.Group();
   axisGizmo.add(
-    axisArrow(1, 0.05, 0, 0xff4444, 'X', '#ff8888'),
-    axisArrow(1, 0.05, 1, 0x44dd44, 'Y', '#88ff88'),
-    axisArrow(1, 0.05, 2, 0x4488ff, 'Z', '#88bbff'),
+    axisArrow(1, 0.05, 0, 0x44dd44, 'Y', '#88ff88'),
+    axisArrow(1, 0.05, 1, 0x4488ff, 'Z', '#88bbff'),
+    axisArrow(1, 0.05, 2, 0xff4444, 'X', '#ff8888'),
   );
   const axisGizmoScene = new THREE.Group();
   axisGizmoScene.add(axisGizmo);
