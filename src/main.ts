@@ -186,6 +186,9 @@ function refreshClipPointMarkers() {
     const marker = makePointMarker();
     marker.position.copy(def.point);
     marker.visible = true;
+    // Tags each marker with the plane it belongs to, so a raycast hit on it
+    // (see createPane's raycastClipMarker) can look the def back up to drag.
+    marker.userData.clipPlaneId = def.id;
     clipPointMarkersGroup.add(marker);
   });
 }
@@ -275,25 +278,20 @@ function meshPlaneIntersectionSegments(mesh: THREE.Mesh, plane: THREE.Plane): TH
   return segments;
 }
 
-// A plane placed by clicking directly on a flat face is now oriented to
-// match that face exactly (see placeClipPlaneAt) - so its "cut" doesn't
-// slice through anything, it lies flush with a whole face. Clipping by such
-// a plane is a no-op (or, normal-flipped, discards the entire mesh), but
-// either way that flush face sits exactly on the clip boundary, where
-// floating-point rounding in the renderer's per-fragment distance test
-// flickers it in and out the same way an un-nudged cut highlight would (see
-// CUT_HIGHLIGHT_OFFSET above) - with no cut to show for the trouble. This
-// walks every triangle looking for one entirely coincident with `plane`
-// (all three vertices within PLANE_FACE_COINCIDENCE_EPS of it) so callers
-// can skip clipping by such a plane entirely instead.
+// Every triangle under `root` that's entirely coincident with `plane` (all
+// three vertices within PLANE_FACE_COINCIDENCE_EPS of it), as flat world-
+// space vertex triples — used both to detect a flush plane (see
+// planeCoincidesWithAFace) and to build the hover face-highlight (see
+// createPane's faceHoverHighlight), which is exactly the same "which
+// triangles lie on this face's plane" query in both cases.
 const PLANE_FACE_COINCIDENCE_EPS = 1e-6;
-function planeCoincidesWithAFace(root: THREE.Object3D, plane: THREE.Plane): boolean {
+function facesCoincidentWithPlane(root: THREE.Object3D, plane: THREE.Plane): THREE.Vector3[] {
   const vA = new THREE.Vector3();
   const vB = new THREE.Vector3();
   const vC = new THREE.Vector3();
-  let coincides = false;
+  const verts: THREE.Vector3[] = [];
   root.traverse((child) => {
-    if (coincides || !(child instanceof THREE.Mesh)) return;
+    if (!(child instanceof THREE.Mesh)) return;
     const geometry = child.geometry;
     const positions = geometry.getAttribute('position');
     const index = geometry.index;
@@ -310,12 +308,23 @@ function planeCoincidesWithAFace(root: THREE.Object3D, plane: THREE.Plane): bool
         Math.abs(plane.distanceToPoint(vB)) < PLANE_FACE_COINCIDENCE_EPS &&
         Math.abs(plane.distanceToPoint(vC)) < PLANE_FACE_COINCIDENCE_EPS
       ) {
-        coincides = true;
-        return;
+        verts.push(vA.clone(), vB.clone(), vC.clone());
       }
     }
   });
-  return coincides;
+  return verts;
+}
+
+// A plane placed by clicking directly on a flat face is now oriented to
+// match that face exactly (see placeClipPlaneAt) - so its "cut" doesn't
+// slice through anything, it lies flush with a whole face. Clipping by such
+// a plane is a no-op (or, normal-flipped, discards the entire mesh), but
+// either way that flush face sits exactly on the clip boundary, where
+// floating-point rounding in the renderer's per-fragment distance test
+// flickers it in and out the same way an un-nudged cut highlight would (see
+// CUT_HIGHLIGHT_OFFSET above) - with no cut to show for the trouble.
+function planeCoincidesWithAFace(root: THREE.Object3D, plane: THREE.Plane): boolean {
+  return facesCoincidentWithPlane(root, plane).length > 0;
 }
 
 // Rebuilds one pane's cut-edge highlight geometry from every Mesh under
@@ -336,6 +345,89 @@ function updateCutEdgeHighlight(highlight: THREE.LineSegments, plane: THREE.Plan
   highlight.geometry = new THREE.BufferGeometry().setFromPoints(points);
   highlight.computeLineDistances();
   highlight.visible = points.length > 0;
+}
+
+// World-space geometric normal of the exact triangle a raycast hit, if any
+// — the face's own orientation, independent of the camera (see
+// placeClipPlaneAt for why that matters more than a camera-derived one).
+function hitFaceNormal(hit: THREE.Intersection): THREE.Vector3 | null {
+  if (!hit.face) return null;
+  return hit.face.normal.clone().applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld)).normalize();
+}
+
+// Every triangle coincident with the exact face a raycast hit sits on (see
+// facesCoincidentWithPlane), nudged toward the viewer by the same amount as
+// the cut-edge highlight to avoid z-fighting against that face's own real
+// geometry — used to build createPane's faceHoverHighlight while placing a
+// new plane, so the user can see which face the red dot would attach to.
+function faceHighlightGeometryForHit(hit: THREE.Intersection): THREE.BufferGeometry | null {
+  const normal = hitFaceNormal(hit);
+  if (!normal) return null;
+  const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, hit.point);
+  const verts = facesCoincidentWithPlane(content, plane);
+  if (verts.length === 0) return null;
+  verts.forEach((v) => v.addScaledVector(normal, CUT_HIGHLIGHT_OFFSET));
+  return new THREE.BufferGeometry().setFromPoints(verts);
+}
+
+// Translucent overlay on the face currently under the cursor while placing a
+// new plane — see faceHighlightGeometryForHit and createPane's
+// faceHoverHighlight. Its own exclusive layer, like createCutEdgeHighlight,
+// since split-view panes can each be hovering a different face at once.
+function createFaceHoverHighlight(): { object: THREE.Mesh; layer: number } {
+  const layer = nextClipHighlightLayer++;
+  const object = new THREE.Mesh(
+    new THREE.BufferGeometry(),
+    new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.35, side: THREE.DoubleSide }),
+  );
+  object.renderOrder = 998;
+  object.visible = false;
+  object.layers.set(layer);
+  scene.add(object);
+  return { object, layer };
+}
+
+// Short line through a plane's point along its normal, shown while hovering
+// or dragging that plane's marker (see createPane's dragGuideLine) as the
+// "slider track" affordance for offsetting the plane's depth. depthTest off
+// and a high renderOrder, like the world-axes gizmo's axisRod, since it's a
+// transient UI overlay rather than scene content.
+const DRAG_GUIDE_HALF_LENGTH = 0.5;
+function createDragGuideLine(): { object: THREE.LineSegments; layer: number } {
+  const layer = nextClipHighlightLayer++;
+  const object = new THREE.LineSegments(
+    new THREE.BufferGeometry(),
+    new THREE.LineBasicMaterial({ color: CLIP_POINT_MARKER_COLOR, transparent: true, opacity: 0.9, depthTest: false }),
+  );
+  object.renderOrder = 1000;
+  object.visible = false;
+  object.layers.set(layer);
+  scene.add(object);
+  return { object, layer };
+}
+
+// Standard closest-point-between-two-skew-lines, used to drag a plane's
+// point along its own normal (the "line") to track the mouse ray as closely
+// as a straight 1D constraint can — the same technique a 3D editor's
+// translate-along-axis gizmo uses. Falls back to the line's own point
+// unchanged if the ray is (near) parallel to it, where the two-line system
+// is degenerate and has no single closest point.
+function closestPointOnLineToRay(
+  linePoint: THREE.Vector3,
+  lineDir: THREE.Vector3,
+  rayOrigin: THREE.Vector3,
+  rayDir: THREE.Vector3,
+): THREE.Vector3 {
+  const r = new THREE.Vector3().subVectors(rayOrigin, linePoint);
+  const a = lineDir.dot(lineDir);
+  const b = lineDir.dot(rayDir);
+  const c = rayDir.dot(rayDir);
+  const d = lineDir.dot(r);
+  const e = rayDir.dot(r);
+  const denom = a * c - b * b;
+  if (Math.abs(denom) < 1e-9) return linePoint.clone();
+  const s = (b * e - c * d) / denom;
+  return linePoint.clone().addScaledVector(lineDir, s);
 }
 
 function contentBoundsCenter(): THREE.Vector3 | null {
@@ -611,6 +703,30 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   // pane rather than keeping it exclusive is harmless.
   const placementHoverMarker = makePointMarker();
   scene.add(placementHoverMarker);
+
+  // Highlights whichever face placementHoverMarker currently sits on, so
+  // it's clear which face a click would attach the new plane to (see
+  // updatePlacementHoverMarker below).
+  const { object: faceHoverHighlight, layer: faceHoverHighlightLayer } = createFaceHoverHighlight();
+  camera.layers.enable(faceHoverHighlightLayer);
+
+  // "Slider track" shown while hovering or dragging a placed plane's marker
+  // (see raycastClipMarker / stepClipPlaneDrag below) to offset its depth
+  // along its own normal. Its layer is deliberately NOT enabled on the
+  // camera here — like a marker, it sits exactly on whatever plane it
+  // belongs to, so the active clipping plane would slice it in two; step()
+  // only ever includes this layer in its second, always-unclipped render
+  // pass (see MARKER_LAYER there), never the main one.
+  const { object: dragGuideLine, layer: dragGuideLineLayer } = createDragGuideLine();
+
+  // Non-null while the user is dragging a placed plane's marker to offset it
+  // along its own normal (see raycastClipMarker/stepClipPlaneDrag). The drag
+  // line/direction are fixed at drag-start — closestPointOnLineToRay only
+  // needs any one point on the line, not the current one, to keep tracking
+  // the mouse along it.
+  let draggingClipPlaneId: string | null = null;
+  const dragLineAnchor = new THREE.Vector3();
+  const dragLineDir = new THREE.Vector3();
 
   function applyClipSelection() {
     const def = clipPlanes.find((p) => p.id === selectedClipPlaneId) ?? null;
@@ -1110,20 +1226,42 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     } else if (event.button === 1) {
       isPanning = true;
       setCursor('pan');
+    } else if (event.button === 0 && !placementModeActive) {
+      // Grabbing a placed plane's marker starts a drag along its normal
+      // (see stepClipPlaneDrag) instead of the ordinary nav-cube click.
+      const marker = raycastClipMarker(event.clientX, event.clientY);
+      const def = marker ? clipPlanes.find((p) => p.id === marker.userData.clipPlaneId) : undefined;
+      if (def) {
+        event.preventDefault();
+        renderer.domElement.setPointerCapture(event.pointerId);
+        draggingClipPlaneId = def.id;
+        dragLineAnchor.copy(def.point);
+        dragLineDir.copy(def.normal);
+      }
     }
   });
   renderer.domElement.addEventListener('pointermove', (event) => {
     if (event.pointerType !== 'mouse') return;
     stepOrbit(event.clientX, event.clientY);
     navCubeHovering = pointerOverNavCubeRegion(event.clientX, event.clientY);
-    if (!orbit.active && !isPanning) {
-      renderer.domElement.style.cursor = navCubeHovering && navCubeShowingFull() ? 'pointer' : '';
-    }
     updatePlacementHoverMarker(event.clientX, event.clientY);
+    stepClipPlaneDrag(event.clientX, event.clientY);
+    const markerHover = updateMarkerHoverAffordance(event.clientX, event.clientY);
+    if (!orbit.active && !isPanning) {
+      renderer.domElement.style.cursor = draggingClipPlaneId
+        ? 'grabbing'
+        : markerHover
+          ? 'grab'
+          : navCubeHovering && navCubeShowingFull()
+            ? 'pointer'
+            : '';
+    }
   });
   renderer.domElement.addEventListener('pointerleave', () => {
     navCubeHovering = false;
     placementHoverMarker.visible = false;
+    faceHoverHighlight.visible = false;
+    if (!draggingClipPlaneId) dragGuideLine.visible = false;
   });
   renderer.domElement.addEventListener('pointerup', (event) => {
     if (event.pointerType !== 'mouse') return;
@@ -1142,6 +1280,10 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
         lastMiddleClick = { time: now, x: event.clientX, y: event.clientY };
       }
     } else if (event.button === 0) {
+      if (draggingClipPlaneId) {
+        draggingClipPlaneId = null;
+        return;
+      }
       if (placementModeActive) {
         placeClipPlaneAt(event.clientX, event.clientY);
         return;
@@ -1179,9 +1321,7 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     const hit = raycastContentMesh(clientX, clientY);
     if (!hit) return;
     const point = hit.point.clone();
-    const faceNormal = hit.face
-      ? hit.face.normal.clone().applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld)).normalize()
-      : point.clone().sub(camera.position).normalize();
+    const faceNormal = hitFaceNormal(hit) ?? point.clone().sub(camera.position).normalize();
     // Kept side defaults to the far side (away from the camera), not the
     // near one, so the newly-placed cut immediately shows the cross-section
     // facing the viewer instead of just the same outer surface just clicked.
@@ -1193,19 +1333,105 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     const normal = faceNormal.dot(towardCamera) > 0 ? faceNormal.clone().negate() : faceNormal;
     setClipPlaneSelection(addClipPlane(point, normal));
     placementHoverMarker.visible = false;
+    faceHoverHighlight.visible = false;
   }
 
   // Live preview shown while waiting for that click — lets the user see
   // exactly where the plane will land, on whatever surface the cursor is
-  // currently over, before committing.
+  // currently over, before committing. The face it would attach to gets a
+  // translucent highlight too (see faceHighlightGeometryForHit), so it's
+  // clear which face is about to be selected, not just which point.
   function updatePlacementHoverMarker(clientX: number, clientY: number) {
     if (!placementModeActive) {
       placementHoverMarker.visible = false;
+      faceHoverHighlight.visible = false;
       return;
     }
     const hit = raycastContentMesh(clientX, clientY);
     placementHoverMarker.visible = !!hit;
     if (hit) placementHoverMarker.position.copy(hit.point);
+
+    const highlightGeometry = hit ? faceHighlightGeometryForHit(hit) : null;
+    if (highlightGeometry) {
+      faceHoverHighlight.geometry.dispose();
+      faceHoverHighlight.geometry = highlightGeometry;
+      faceHoverHighlight.visible = true;
+    } else {
+      faceHoverHighlight.visible = false;
+    }
+  }
+
+  // Raycasts against the placed-plane markers (only meaningful while the
+  // cutting-planes dialog is open, so its group is visible) to find which
+  // plane, if any, the cursor is over — see stepClipPlaneDrag and
+  // updateMarkerHoverAffordance. The shared raycaster defaults to layer 0
+  // only, so MARKER_LAYER (where every marker lives) needs enabling just for
+  // this one query, then restoring, the same way step()'s unclipped marker
+  // pass saves/restores camera.layers.mask.
+  function raycastClipMarker(clientX: number, clientY: number): THREE.Mesh | null {
+    if (!clipPointMarkersGroup.visible) return null;
+    const rect = renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+    raycaster.setFromCamera(ndc, camera);
+    const savedMask = raycaster.layers.mask;
+    raycaster.layers.set(MARKER_LAYER);
+    const hit = raycaster.intersectObjects(clipPointMarkersGroup.children, false)[0];
+    raycaster.layers.mask = savedMask;
+    return hit ? (hit.object as THREE.Mesh) : null;
+  }
+
+  // Moves the currently-dragged plane's point along its own normal to track
+  // the mouse as closely as that one-dimensional constraint allows — this is
+  // the "depth slider": the plane's orientation never changes, only how far
+  // along it sits, so this is exactly the offset that was otherwise missing
+  // for pushing a face-flush plane (see planeCoincidesWithAFace) into the
+  // model to get an actual cut.
+  function stepClipPlaneDrag(clientX: number, clientY: number) {
+    if (!draggingClipPlaneId) return;
+    const def = clipPlanes.find((p) => p.id === draggingClipPlaneId);
+    if (!def) {
+      draggingClipPlaneId = null;
+      return;
+    }
+    const rect = renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+    raycaster.setFromCamera(ndc, camera);
+    def.point.copy(closestPointOnLineToRay(dragLineAnchor, dragLineDir, raycaster.ray.origin, raycaster.ray.direction));
+    refreshClipPlaneDef(def);
+    reapplyClipPlaneEverywhere();
+    refreshClipPointMarkers();
+  }
+
+  // Shows the drag guide line on whichever plane's marker is hovered or
+  // being dragged, and reports whether the cursor should read as
+  // draggable — the caller folds that into its single cursor decision so
+  // this doesn't fight with the nav-cube-hover cursor logic below.
+  function updateMarkerHoverAffordance(clientX: number, clientY: number): boolean {
+    if (draggingClipPlaneId) {
+      const def = clipPlanes.find((p) => p.id === draggingClipPlaneId);
+      if (def) showDragGuideLine(def.point, def.normal);
+      return true;
+    }
+    if (placementModeActive) {
+      dragGuideLine.visible = false;
+      return false;
+    }
+    const marker = raycastClipMarker(clientX, clientY);
+    const def = marker ? clipPlanes.find((p) => p.id === marker.userData.clipPlaneId) : undefined;
+    if (def) {
+      showDragGuideLine(def.point, def.normal);
+      return true;
+    }
+    dragGuideLine.visible = false;
+    return false;
+  }
+
+  function showDragGuideLine(point: THREE.Vector3, normal: THREE.Vector3): void {
+    const a = point.clone().addScaledVector(normal, -DRAG_GUIDE_HALF_LENGTH);
+    const b = point.clone().addScaledVector(normal, DRAG_GUIDE_HALF_LENGTH);
+    dragGuideLine.geometry.dispose();
+    dragGuideLine.geometry = new THREE.BufferGeometry().setFromPoints([a, b]);
+    dragGuideLine.visible = true;
   }
 
   renderer.domElement.addEventListener('touchstart', (event) => {
@@ -1307,6 +1533,7 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     const layersBefore = camera.layers.mask;
     const backgroundBefore = scene.background;
     camera.layers.set(MARKER_LAYER);
+    camera.layers.enable(dragGuideLineLayer);
     scene.background = null;
     renderer.render(scene, camera);
     scene.background = backgroundBefore;
@@ -1323,6 +1550,15 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     scene.remove(cutEdgeHighlight);
     cutEdgeHighlight.geometry.dispose();
     (cutEdgeHighlight.material as THREE.Material).dispose();
+    scene.remove(placementHoverMarker);
+    placementHoverMarker.geometry.dispose();
+    (placementHoverMarker.material as THREE.Material).dispose();
+    scene.remove(faceHoverHighlight);
+    faceHoverHighlight.geometry.dispose();
+    (faceHoverHighlight.material as THREE.Material).dispose();
+    scene.remove(dragGuideLine);
+    dragGuideLine.geometry.dispose();
+    (dragGuideLine.material as THREE.Material).dispose();
     navMaterials.forEach((material) => {
       material.map?.dispose();
       material.dispose();
@@ -1371,6 +1607,7 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     applyClipSelection,
     hidePlacementHoverMarker: () => {
       placementHoverMarker.visible = false;
+      faceHoverHighlight.visible = false;
     },
   };
 }
