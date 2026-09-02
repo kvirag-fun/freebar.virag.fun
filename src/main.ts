@@ -98,6 +98,27 @@ function makeNavFaceTexture(label: string): THREE.CanvasTexture {
   ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
   ctx.lineWidth = 10;
   ctx.strokeRect(5, 5, size - 10, size - 10);
+
+  // A 3x3 grid marking the actual clickable zones: the center cell is a
+  // pure single-axis click, the four edge-mid cells combine with the
+  // adjacent face (a 2-axis view), and the four corner cells combine with
+  // two adjacent faces (a 3-axis view) — see hitTestNavCube. The lines sit
+  // exactly at NAV_EDGE_FRACTION so the outline always matches the hit-test.
+  const inner = ((1 - NAV_EDGE_FRACTION) / 2) * size;
+  const outer = size - inner;
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.22)';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(inner, 0);
+  ctx.lineTo(inner, size);
+  ctx.moveTo(outer, 0);
+  ctx.lineTo(outer, size);
+  ctx.moveTo(0, inner);
+  ctx.lineTo(size, inner);
+  ctx.moveTo(0, outer);
+  ctx.lineTo(size, outer);
+  ctx.stroke();
+
   ctx.fillStyle = '#f2f0ea';
   ctx.font = '600 68px "Helvetica Neue", Arial, sans-serif';
   ctx.textAlign = 'center';
