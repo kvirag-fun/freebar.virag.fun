@@ -7,6 +7,14 @@ const panesEl = document.querySelector<HTMLElement>('#panes')!;
 const splitViewBtn = document.querySelector<HTMLButtonElement>('#split-view-btn')!;
 const navCubeBtn = document.querySelector<HTMLButtonElement>('#nav-cube-btn')!;
 const axisGizmoBtn = document.querySelector<HTMLButtonElement>('#axis-gizmo-btn')!;
+const clipPlaneBtn = document.querySelector<HTMLButtonElement>('#clip-plane-btn')!;
+const clipPlaneDialog = document.querySelector<HTMLElement>('#clip-plane-dialog')!;
+const clipPlaneCloseBtn = document.querySelector<HTMLButtonElement>('#clip-plane-close-btn')!;
+const clipPlaneList = document.querySelector<HTMLElement>('#clip-plane-list')!;
+const clipPlaneEmpty = document.querySelector<HTMLElement>('#clip-plane-empty')!;
+const clipPlaneAddBtn = document.querySelector<HTMLButtonElement>('#clip-plane-add-btn')!;
+const clipPlaneBanner = document.querySelector<HTMLElement>('#clip-plane-banner')!;
+const clipPlaneCancelBtn = document.querySelector<HTMLButtonElement>('#clip-plane-cancel-btn')!;
 
 // Shared across every pane, so one button hides/shows the cube/axes everywhere at once.
 // The nav cube cycles full -> mini -> off -> full: "mini" renders small and
@@ -14,6 +22,23 @@ const axisGizmoBtn = document.querySelector<HTMLButtonElement>('#axis-gizmo-btn'
 type NavCubeMode = 'full' | 'mini' | 'off';
 let navCubeMode: NavCubeMode = 'full';
 let axisGizmoVisible = true;
+
+// Cutting planes: a named list the user manages from the header dialog, but
+// only one clips the model at a time (see applyActiveClipPlane). Each plane
+// is a point + unit normal — the plane keeps the half-space the normal points
+// into and clips away the other side, matching THREE.Plane's own convention.
+type ClipPlaneDef = { id: string; name: string; point: THREE.Vector3; normal: THREE.Vector3 };
+let clipPlanes: ClipPlaneDef[] = [];
+let activeClipPlaneId: string | null = null;
+let nextClipPlaneNumber = 1;
+// True while waiting for the user to click a point on the model to place a
+// new plane (triggered by the dialog's "+ Add plane" button) — see the
+// pointerdown handling in createPane and addClipPlane below.
+let placementModeActive = false;
+// Mutated in place from the active ClipPlaneDef rather than replaced, so every
+// pane's renderer.clippingPlanes array (set in step()) can reference this same
+// object without needing to be reassigned when the active plane changes.
+const sharedClipPlane = new THREE.Plane();
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1a1a1a);
@@ -52,7 +77,10 @@ scene.add(content);
 // shown as "Z") = 2, depth (world Z, shown as "X") = 3
 const box = new THREE.Mesh(
   new THREE.BoxGeometry(1, 2, 3),
-  new THREE.MeshStandardMaterial({ color: 0x4a9eff, metalness: 0.1, roughness: 0.6 }),
+  // Double-sided so a cutting plane (see applyActiveClipPlane) exposes a
+  // solid-looking interior wall at the cut instead of culling those
+  // newly-visible back faces and showing gaps through to whatever's behind.
+  new THREE.MeshStandardMaterial({ color: 0x4a9eff, metalness: 0.1, roughness: 0.6, side: THREE.DoubleSide }),
 );
 box.position.y = 1; // sit on top of the grid
 content.add(box);
@@ -308,6 +336,9 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   // would wipe out the main scene's just-drawn pixels everywhere else. So
   // clearing is done manually, once, at the start of each frame instead.
   renderer.autoClear = false;
+  // Required for renderer.clippingPlanes (set per-frame in step()) to have
+  // any effect at all — the array itself is what actually turns clipping on.
+  renderer.localClippingEnabled = true;
   container.appendChild(renderer.domElement);
 
   // Camera controls: left = none (reserved for future selection/manipulation),
@@ -802,6 +833,10 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
         lastMiddleClick = { time: now, x: event.clientX, y: event.clientY };
       }
     } else if (event.button === 0) {
+      if (placementModeActive) {
+        placeClipPlaneAt(event.clientX, event.clientY);
+        return;
+      }
       const dir = hitTestNavCube(event.clientX, event.clientY);
       if (dir) {
         snapToView(dir);
@@ -809,6 +844,23 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
       }
     }
   });
+
+  // Cutting-plane placement: while the dialog's "+ Add plane" flow is
+  // waiting for a click (placementModeActive), a left-click anywhere on the
+  // model places a plane through that point, facing this pane's camera —
+  // matching "click a point, the plane goes through it, parallel to my
+  // viewing direction" rather than the nav cube's click-to-snap-view. Nav
+  // cube clicks are ignored entirely during placement, so the two never mix.
+  function placeClipPlaneAt(clientX: number, clientY: number) {
+    const rect = renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+    raycaster.setFromCamera(ndc, camera);
+    const hit = raycaster.intersectObject(content, true)[0];
+    if (!hit) return;
+    const point = hit.point.clone();
+    const normal = camera.position.clone().sub(point).normalize();
+    addClipPlane(point, normal);
+  }
 
   renderer.domElement.addEventListener('touchstart', (event) => {
     tween = null;
@@ -890,7 +942,14 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     }
 
     renderer.clear();
+    // Clipping applies only to the main scene render — the nav cube and axis
+    // gizmo are drawn afterward from their own small, unrelated local-origin
+    // scenes, and would otherwise risk being clipped too if the active
+    // plane's world-space position happened to fall within their own tiny
+    // coordinate range.
+    renderer.clippingPlanes = activeClipPlaneId ? [sharedClipPlane] : [];
     renderer.render(scene, camera);
+    renderer.clippingPlanes = [];
     renderNavCube();
     renderAxisGizmo();
   }
@@ -1027,6 +1086,136 @@ axisGizmoBtn.addEventListener('click', () => {
   const label = axisGizmoVisible ? 'Hide axis indicator' : 'Show axis indicator';
   axisGizmoBtn.querySelector('.tooltip')!.textContent = label;
   axisGizmoBtn.setAttribute('aria-label', label);
+});
+
+// Cutting-plane manager: dialog list (rename/select-active/align-to-axis/
+// flip/view/delete), the "+ Add plane" placement flow, and applying the
+// active plane to every pane's renderer (see step()'s clippingPlanes toggle).
+
+function escapeHtml(text: string): string {
+  return text.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+}
+
+function applyActiveClipPlane() {
+  const active = clipPlanes.find((p) => p.id === activeClipPlaneId);
+  if (active) sharedClipPlane.setFromNormalAndCoplanarPoint(active.normal, active.point);
+}
+
+function renderClipPlaneList() {
+  clipPlaneEmpty.hidden = clipPlanes.length > 0;
+  clipPlaneList.innerHTML = clipPlanes
+    .map(
+      (p) => `
+    <li class="clip-plane-row" data-id="${p.id}">
+      <input type="radio" name="clip-plane-active" class="clip-plane-radio" ${p.id === activeClipPlaneId ? 'checked' : ''} aria-label="Enable ${escapeHtml(p.name)}" />
+      <input type="text" class="clip-plane-name" value="${escapeHtml(p.name)}" aria-label="Plane name" />
+      <span class="clip-plane-axis-btns">
+        <button type="button" data-axis="x" title="Align to X axis">X</button>
+        <button type="button" data-axis="y" title="Align to Y axis">Y</button>
+        <button type="button" data-axis="z" title="Align to Z axis">Z</button>
+        <button type="button" data-axis="flip" title="Flip normal">&#8645;</button>
+      </span>
+      <button type="button" class="clip-plane-view-btn" data-dir="pos" title="View from + side">View &rarr;</button>
+      <button type="button" class="clip-plane-view-btn" data-dir="neg" title="View from &minus; side">View &larr;</button>
+      <button type="button" class="clip-plane-delete-btn" title="Delete plane" aria-label="Delete ${escapeHtml(p.name)}">&times;</button>
+    </li>`,
+    )
+    .join('');
+}
+
+function addClipPlane(point: THREE.Vector3, normal: THREE.Vector3) {
+  const id = `plane-${nextClipPlaneNumber}`;
+  const def: ClipPlaneDef = { id, name: `Plane ${nextClipPlaneNumber}`, point: point.clone(), normal: normal.clone() };
+  nextClipPlaneNumber++;
+  clipPlanes.push(def);
+  activeClipPlaneId = id;
+  applyActiveClipPlane();
+  exitPlacementMode();
+  clipPlaneDialog.hidden = false;
+  renderClipPlaneList();
+}
+
+function exitPlacementMode() {
+  placementModeActive = false;
+  clipPlaneBanner.hidden = true;
+}
+
+clipPlaneBtn.addEventListener('click', () => {
+  renderClipPlaneList();
+  clipPlaneDialog.hidden = false;
+});
+
+clipPlaneCloseBtn.addEventListener('click', () => {
+  clipPlaneDialog.hidden = true;
+});
+
+clipPlaneDialog.addEventListener('click', (event) => {
+  if (event.target === clipPlaneDialog) clipPlaneDialog.hidden = true;
+});
+
+clipPlaneAddBtn.addEventListener('click', () => {
+  clipPlaneDialog.hidden = true;
+  clipPlaneBanner.hidden = false;
+  placementModeActive = true;
+});
+
+clipPlaneCancelBtn.addEventListener('click', () => {
+  exitPlacementMode();
+  clipPlaneDialog.hidden = false;
+});
+
+window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && placementModeActive) {
+    exitPlacementMode();
+    clipPlaneDialog.hidden = false;
+  }
+});
+
+clipPlaneList.addEventListener('change', (event) => {
+  const target = event.target as HTMLElement;
+  const row = target.closest<HTMLElement>('.clip-plane-row');
+  if (!row) return;
+  const id = row.dataset.id!;
+  if (target.classList.contains('clip-plane-radio')) {
+    activeClipPlaneId = id;
+    applyActiveClipPlane();
+  } else if (target.classList.contains('clip-plane-name')) {
+    const plane = clipPlanes.find((p) => p.id === id);
+    const value = (target as HTMLInputElement).value.trim();
+    if (plane && value) plane.name = value;
+  }
+});
+
+clipPlaneList.addEventListener('click', (event) => {
+  const button = (event.target as HTMLElement).closest('button');
+  if (!button) return;
+  const row = button.closest<HTMLElement>('.clip-plane-row');
+  if (!row) return;
+  const id = row.dataset.id!;
+  const plane = clipPlanes.find((p) => p.id === id);
+  if (!plane) return;
+
+  if (button.classList.contains('clip-plane-delete-btn')) {
+    clipPlanes = clipPlanes.filter((p) => p.id !== id);
+    if (activeClipPlaneId === id) {
+      activeClipPlaneId = null;
+    }
+    renderClipPlaneList();
+    return;
+  }
+
+  if (button.classList.contains('clip-plane-view-btn')) {
+    const dir = button.dataset.dir === 'pos' ? plane.normal.clone() : plane.normal.clone().negate();
+    panes.forEach((pane) => pane.snapToView(dir));
+    return;
+  }
+
+  const axis = button.dataset.axis;
+  if (axis === 'x') plane.normal.set(1, 0, 0);
+  else if (axis === 'y') plane.normal.set(0, 1, 0);
+  else if (axis === 'z') plane.normal.set(0, 0, 1);
+  else if (axis === 'flip') plane.normal.negate();
+  if (plane.id === activeClipPlaneId) applyActiveClipPlane();
 });
 
 window.addEventListener('resize', () => {
