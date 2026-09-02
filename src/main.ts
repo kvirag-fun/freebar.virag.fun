@@ -6,9 +6,11 @@ const viewport = document.querySelector<HTMLElement>('#viewport')!;
 const panesEl = document.querySelector<HTMLElement>('#panes')!;
 const splitViewBtn = document.querySelector<HTMLButtonElement>('#split-view-btn')!;
 const navCubeBtn = document.querySelector<HTMLButtonElement>('#nav-cube-btn')!;
+const axisGizmoBtn = document.querySelector<HTMLButtonElement>('#axis-gizmo-btn')!;
 
-// Shared across every pane, so one button hides/shows the cube everywhere at once.
+// Shared across every pane, so one button hides/shows the cube/axes everywhere at once.
 let navCubeVisible = true;
+let axisGizmoVisible = true;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1a1a1a);
@@ -68,6 +70,29 @@ function easeOutCubic(t: number) {
   return 1 - Math.pow(1 - t, 3);
 }
 
+// A single-direction arrow (shaft + cone tip) from the origin out along one
+// axis, for the corner axis-indicator gizmo — unlike axisRod above, which is
+// a symmetric double-ended rod through the origin (used for the pivot
+// indicator), this points one way only, matching how a "which way is X/Y/Z"
+// aid should read.
+function axisArrow(length: number, thickness: number, axis: 0 | 1 | 2, color: number) {
+  const material = new THREE.MeshBasicMaterial({ color, depthTest: false, transparent: true });
+  const shaftLength = length * 0.8;
+  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(thickness, thickness, shaftLength, 8), material);
+  shaft.position.y = shaftLength / 2;
+  const head = new THREE.Mesh(new THREE.ConeGeometry(thickness * 2.5, length - shaftLength, 8), material);
+  head.position.y = shaftLength + (length - shaftLength) / 2;
+
+  const group = new THREE.Group();
+  group.add(shaft, head);
+  group.renderOrder = 999;
+  // These primitives are built along local +Y; rotate so that axis points
+  // along the requested world axis instead (Y needs no rotation).
+  if (axis === 0) group.rotation.z = -Math.PI / 2; // +Y -> +X
+  else if (axis === 2) group.rotation.x = Math.PI / 2; // +Y -> +Z
+  return group;
+}
+
 const raycaster = new THREE.Raycaster();
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 const ROTATE_SPEED = 0.5;
@@ -75,11 +100,13 @@ const POLE_EPS = THREE.MathUtils.degToRad(2);
 const TWEEN_MS = 400;
 const FIT_PADDING = 1.2;
 const PIVOT_INDICATOR_SCALE = 0.035; // fraction of camera distance
+const AXIS_GIZMO_SIZE = 110; // px, corner overlay size
+const AXIS_GIZMO_MARGIN_BOTTOM = 34; // clears #build-stamp, which sits in the same corner
 
 // Navigation cube: one labeled face per standard view. BoxGeometry's default
 // material-group order is [+X, -X, +Y, -Y, +Z, -Z], which is exactly the
 // order these labels and directions are listed in below.
-const NAV_CUBE_SIZE = 180; // px, corner overlay size
+const NAV_CUBE_SIZE = 225; // px, corner overlay size (180 * 1.25)
 const NAV_LABELS = ['RIGHT', 'LEFT', 'TOP', 'BOTTOM', 'FRONT', 'BACK'];
 const NAV_CUBE_HALF = 0.7; // half-extent of the 1.4-unit BoxGeometry below
 const NAV_EDGE_FRACTION = 0.5; // beyond this fraction of the half-extent, an axis counts as "near that edge" too
@@ -106,8 +133,8 @@ function makeNavFaceTexture(label: string): THREE.CanvasTexture {
   // exactly at NAV_EDGE_FRACTION so the outline always matches the hit-test.
   const inner = ((1 - NAV_EDGE_FRACTION) / 2) * size;
   const outer = size - inner;
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.22)';
-  ctx.lineWidth = 3;
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+  ctx.lineWidth = 10;
   ctx.beginPath();
   ctx.moveTo(inner, 0);
   ctx.lineTo(inner, size);
@@ -120,9 +147,18 @@ function makeNavFaceTexture(label: string): THREE.CanvasTexture {
   ctx.stroke();
 
   ctx.fillStyle = '#f2f0ea';
-  ctx.font = '600 68px "Helvetica Neue", Arial, sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
+  // Text must fit inside the center cell only (the other 8 cells are
+  // edge/corner click zones, see above) — shrink the longest labels
+  // ("BOTTOM") down until they fit rather than clipping into the grid lines.
+  const maxTextWidth = (outer - inner) * 0.82;
+  let fontSize = 72;
+  const fontFamily = '"Helvetica Neue", Arial, sans-serif';
+  do {
+    ctx.font = `600 ${fontSize}px ${fontFamily}`;
+    fontSize -= 2;
+  } while (ctx.measureText(label).width > maxTextWidth && fontSize > 20);
   ctx.fillText(label, size / 2, size / 2 + 2);
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
@@ -234,6 +270,25 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   navCamera.lookAt(0, 0, 0);
   const navViewport = new THREE.Vector4();
 
+  // Briefly flashes whichever face(s) a click resolved to (1 for a face, 2
+  // for an edge, 3 for a corner), fading back to normal over HIGHLIGHT_MS —
+  // pure visual feedback that the click registered and which axes it used.
+  const HIGHLIGHT_MS = 400;
+  const HIGHLIGHT_COLOR = new THREE.Color(0xffcf7a);
+  const NORMAL_COLOR = new THREE.Color(0xffffff);
+  let faceHighlight: { indices: number[]; start: number } | null = null;
+
+  function highlightFacesForDirection(dir: THREE.Vector3) {
+    const indices: number[] = [];
+    if (dir.x > 0) indices.push(0);
+    else if (dir.x < 0) indices.push(1);
+    if (dir.y > 0) indices.push(2);
+    else if (dir.y < 0) indices.push(3);
+    if (dir.z > 0) indices.push(4);
+    else if (dir.z < 0) indices.push(5);
+    faceHighlight = { indices, start: performance.now() };
+  }
+
   function snapToView(dir: THREE.Vector3) {
     const center = contentBoundsCenter() ?? controls.target.clone();
     const distance = camera.position.distanceTo(controls.target);
@@ -285,6 +340,27 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     const y = 8; // viewport y is measured bottom-up, so a small value sits near the bottom
     renderer.setViewport(x, y, NAV_CUBE_SIZE, NAV_CUBE_SIZE);
     renderer.render(navScene, navCamera);
+    renderer.setViewport(navViewport.x, navViewport.y, navViewport.z, navViewport.w);
+  }
+
+  // XYZ direction aid: bottom-left corner, one per pane, same corner-overlay
+  // technique as the nav cube. Purely informational (no click handling) — it
+  // rotates to reflect the pane's current orientation, same as the cube.
+  const axisGizmo = new THREE.Group();
+  axisGizmo.add(axisArrow(1, 0.05, 0, 0xff4444), axisArrow(1, 0.05, 1, 0x44dd44), axisArrow(1, 0.05, 2, 0x4488ff));
+  const axisGizmoScene = new THREE.Group();
+  axisGizmoScene.add(axisGizmo);
+  const axisGizmoCamera = new THREE.OrthographicCamera(-1.5, 1.5, 1.5, -1.5, 0.1, 10);
+  axisGizmoCamera.position.set(0, 0, 4);
+  axisGizmoCamera.lookAt(0, 0, 0);
+
+  function renderAxisGizmo() {
+    if (!axisGizmoVisible) return;
+    axisGizmo.quaternion.copy(camera.quaternion).invert();
+    renderer.getViewport(navViewport);
+    renderer.clearDepth();
+    renderer.setViewport(8, AXIS_GIZMO_MARGIN_BOTTOM, AXIS_GIZMO_SIZE, AXIS_GIZMO_SIZE);
+    renderer.render(axisGizmoScene, axisGizmoCamera);
     renderer.setViewport(navViewport.x, navViewport.y, navViewport.z, navViewport.w);
   }
 
@@ -465,7 +541,10 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
       }
     } else if (event.button === 0) {
       const dir = hitTestNavCube(event.clientX, event.clientY);
-      if (dir) snapToView(dir);
+      if (dir) {
+        snapToView(dir);
+        highlightFacesForDirection(dir);
+      }
     }
   });
 
@@ -506,10 +585,17 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
       pivotIndicator.scale.setScalar(scale);
     }
 
+    if (faceHighlight) {
+      const t = Math.min(1, (performance.now() - faceHighlight.start) / HIGHLIGHT_MS);
+      faceHighlight.indices.forEach((i) => navMaterials[i].color.lerpColors(HIGHLIGHT_COLOR, NORMAL_COLOR, t));
+      if (t === 1) faceHighlight = null;
+    }
+
     controls.update();
     renderer.clear();
     renderer.render(scene, camera);
     renderNavCube();
+    renderAxisGizmo();
   }
 
   function dispose() {
@@ -521,6 +607,12 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
       material.dispose();
     });
     navCube.geometry.dispose();
+    axisGizmo.traverse((child) => {
+      if (child instanceof THREE.Mesh) {
+        child.geometry.dispose();
+        child.material.dispose();
+      }
+    });
     container.remove();
   }
 
@@ -611,6 +703,14 @@ navCubeBtn.addEventListener('click', () => {
   const label = navCubeVisible ? 'Hide navigation cube' : 'Show navigation cube';
   navCubeBtn.querySelector('.tooltip')!.textContent = label;
   navCubeBtn.setAttribute('aria-label', label);
+});
+
+axisGizmoBtn.addEventListener('click', () => {
+  axisGizmoVisible = !axisGizmoVisible;
+  axisGizmoBtn.classList.toggle('active', axisGizmoVisible);
+  const label = axisGizmoVisible ? 'Hide axis indicator' : 'Show axis indicator';
+  axisGizmoBtn.querySelector('.tooltip')!.textContent = label;
+  axisGizmoBtn.setAttribute('aria-label', label);
 });
 
 window.addEventListener('resize', () => {
