@@ -254,12 +254,6 @@ html, body {
   background: rgba(0, 0, 0, 0.05);
 }
 
-.clip-plane-row input[type='radio'] {
-  flex: 0 0 auto;
-  accent-color: #4a9eff;
-  cursor: pointer;
-}
-
 .clip-plane-name {
   flex: 1 1 auto;
   min-width: 0;
@@ -367,4 +361,41 @@ html, body {
 
 .clip-plane-banner button:hover {
   background: rgba(255, 255, 255, 0.28);
+}
+
+/* Per-pane cutting-plane selector: a small icon by default, so it stays out
+   of the way in every view at once, widening on hover/focus into a real
+   dropdown of every defined plane plus "No cut". */
+.pane-clip-selector {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 5;
+  width: 28px;
+  height: 28px;
+  padding: 0 6px;
+  border: none;
+  border-radius: 6px;
+  appearance: none;
+  background-color: rgba(42, 42, 40, 0.75);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='4' y='4' width='16' height='16' rx='1'/%3E%3Cpath d='M2 13 L22 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 14px 14px;
+  color: transparent;
+  font: 12px/1.4 sans-serif;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: width 0.15s ease, background-color 0.15s ease;
+}
+
+.pane-clip-selector:hover,
+.pane-clip-selector:focus {
+  width: 180px;
+  padding: 0 8px;
+  background-color: rgba(42, 42, 40, 0.92);
+  background-image: none;
+  color: #f5f2ec;
 }

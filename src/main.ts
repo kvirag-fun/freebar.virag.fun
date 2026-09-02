@@ -25,26 +25,37 @@ type NavCubeMode = 'full' | 'mini' | 'off';
 let navCubeMode: NavCubeMode = 'full';
 let axisGizmoVisible = true;
 
-// Cutting planes: a named list the user manages from the header dialog, but
-// only one clips the model at a time (see applyActiveClipPlane). Each plane
-// is a point + unit normal — the plane keeps the half-space the normal points
-// into and clips away the other side, matching THREE.Plane's own convention.
-// originalNormal is the direction captured at placement time (facing the
-// camera) and never mutates — the X/Y/Z/custom buttons all read against it
-// (see clipPlaneAlignmentKind) so the row can show which one is active, and
-// "custom" can restore it after an axis realignment.
-type ClipPlaneDef = { id: string; name: string; point: THREE.Vector3; normal: THREE.Vector3; originalNormal: THREE.Vector3 };
+// Cutting planes: a named list managed from the header dialog (rename,
+// re-orient, delete), but which one — if any — actually clips the model is a
+// per-pane choice made via that pane's own small selector control, not
+// something the dialog picks globally (see createPane's clip-plane section
+// and setClipPlaneSelection). Each plane is a point + unit normal — the plane
+// keeps the half-space the normal points into and clips away the other side,
+// matching THREE.Plane's own convention. `plane` is the derived THREE.Plane,
+// kept in sync with point/normal by refreshClipPlaneDef — panes reference
+// this object directly rather than each maintaining their own copy.
+// originalNormal is the direction captured at placement time (facing away
+// from the camera, into the model) and never mutates — the X/Y/Z/custom
+// buttons all read against it (see clipPlaneAlignmentKind) so the row can
+// show which one is active, and "custom" can restore it after a realignment.
+type ClipPlaneDef = {
+  id: string;
+  name: string;
+  point: THREE.Vector3;
+  normal: THREE.Vector3;
+  originalNormal: THREE.Vector3;
+  plane: THREE.Plane;
+};
 let clipPlanes: ClipPlaneDef[] = [];
-let activeClipPlaneId: string | null = null;
 let nextClipPlaneNumber = 1;
 // True while waiting for the user to click a point on the model to place a
 // new plane (triggered by the dialog's "+ Add plane" button) — see the
 // pointerdown handling in createPane and addClipPlane below.
 let placementModeActive = false;
-// Mutated in place from the active ClipPlaneDef rather than replaced, so every
-// pane's renderer.clippingPlanes array (set in step()) can reference this same
-// object without needing to be reassigned when the active plane changes.
-const sharedClipPlane = new THREE.Plane();
+
+function refreshClipPlaneDef(def: ClipPlaneDef) {
+  def.plane.setFromNormalAndCoplanarPoint(def.normal, def.point);
+}
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1a1a1a);
@@ -83,13 +94,122 @@ scene.add(content);
 // shown as "Z") = 2, depth (world Z, shown as "X") = 3
 const box = new THREE.Mesh(
   new THREE.BoxGeometry(1, 2, 3),
-  // Double-sided so a cutting plane (see applyActiveClipPlane) exposes a
-  // solid-looking interior wall at the cut instead of culling those
-  // newly-visible back faces and showing gaps through to whatever's behind.
+  // Double-sided so a cutting plane (see createPane's clip-plane section)
+  // exposes a solid-looking interior wall at the cut instead of culling
+  // those newly-visible back faces and showing gaps through to whatever's
+  // behind.
   new THREE.MeshStandardMaterial({ color: 0x4a9eff, metalness: 0.1, roughness: 0.6, side: THREE.DoubleSide }),
 );
 box.position.y = 1; // sit on top of the grid
 content.add(box);
+
+// Thin white outline along the box's real (modeled) edges, so they read as
+// distinct from a cut's generated edge (see cutEdgeHighlight below), which
+// is dashed instead. Parented to the box so it inherits its transform and
+// gets cut by the same clipping plane during the main scene render.
+const boxEdges = new THREE.LineSegments(
+  new THREE.EdgesGeometry(box.geometry),
+  new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 }),
+);
+box.add(boxEdges);
+
+// The boundary where a pane's selected cutting plane slices through content
+// — a "generated" edge rather than a modeled one, so it's dashed (see
+// updateCutEdgeHighlight) instead of matching boxEdges' solid white line.
+// Each pane gets its own instance (see createPane), since two panes can have
+// different planes selected in split view and must not show each other's
+// highlight — createCutEdgeHighlight assigns it an exclusive THREE.Layers
+// bit that only that pane's camera enables, so the shared `scene` can hold
+// every pane's highlight without them leaking into each other's render.
+let nextClipHighlightLayer = 1; // layer 0 stays reserved for ordinary shared content
+function createCutEdgeHighlight(): { object: THREE.LineSegments; layer: number } {
+  const layer = nextClipHighlightLayer++;
+  const object = new THREE.LineSegments(
+    new THREE.BufferGeometry(),
+    new THREE.LineDashedMaterial({ color: 0xffffff, dashSize: 0.08, gapSize: 0.06, depthTest: false, transparent: true }),
+  );
+  object.renderOrder = 999;
+  object.visible = false;
+  object.layers.set(layer);
+  scene.add(object);
+  return { object, layer };
+}
+
+// Where a triangle's three plane-distances straddle zero, exactly two of its
+// edges cross the plane — this returns those two crossing points (already in
+// world space, since the caller passes world-space triangle vertices), or
+// null if the triangle doesn't straddle the plane at all.
+function trianglePlaneIntersection(
+  vA: THREE.Vector3,
+  dA: number,
+  vB: THREE.Vector3,
+  dB: number,
+  vC: THREE.Vector3,
+  dC: number,
+): [THREE.Vector3, THREE.Vector3] | null {
+  const eps = 1e-9;
+  const points: THREE.Vector3[] = [];
+  const edges: [THREE.Vector3, number, THREE.Vector3, number][] = [
+    [vA, dA, vB, dB],
+    [vB, dB, vC, dC],
+    [vC, dC, vA, dA],
+  ];
+  for (const [p1, d1, p2, d2] of edges) {
+    if ((d1 > eps && d2 < -eps) || (d1 < -eps && d2 > eps)) {
+      points.push(p1.clone().lerp(p2, d1 / (d1 - d2)));
+    }
+  }
+  return points.length === 2 ? [points[0], points[1]] : null;
+}
+
+// Every line segment where `plane` crosses `mesh`'s surface, in world space
+// — walks every triangle once, testing it against trianglePlaneIntersection.
+// Works for any triangle mesh (not just the placeholder box), so it keeps
+// working once real bar-shape geometry replaces it.
+function meshPlaneIntersectionSegments(mesh: THREE.Mesh, plane: THREE.Plane): THREE.Vector3[] {
+  const geometry = mesh.geometry;
+  const positions = geometry.getAttribute('position');
+  const index = geometry.index;
+  const triCount = (index ? index.count : positions.count) / 3;
+
+  const vA = new THREE.Vector3();
+  const vB = new THREE.Vector3();
+  const vC = new THREE.Vector3();
+  const segments: THREE.Vector3[] = [];
+
+  for (let t = 0; t < triCount; t++) {
+    const ia = index ? index.getX(t * 3) : t * 3;
+    const ib = index ? index.getX(t * 3 + 1) : t * 3 + 1;
+    const ic = index ? index.getX(t * 3 + 2) : t * 3 + 2;
+    vA.fromBufferAttribute(positions, ia).applyMatrix4(mesh.matrixWorld);
+    vB.fromBufferAttribute(positions, ib).applyMatrix4(mesh.matrixWorld);
+    vC.fromBufferAttribute(positions, ic).applyMatrix4(mesh.matrixWorld);
+
+    const segment = trianglePlaneIntersection(vA, plane.distanceToPoint(vA), vB, plane.distanceToPoint(vB), vC, plane.distanceToPoint(vC));
+    if (segment) segments.push(segment[0], segment[1]);
+  }
+  return segments;
+}
+
+// Rebuilds one pane's cut-edge highlight geometry from every Mesh under
+// `content`, against whichever plane that pane currently has selected — call
+// whenever a pane's selection changes, or the selected plane's point/normal
+// does (see setClipPlaneSelection / applyClipSelection in createPane), not
+// per frame.
+function updateCutEdgeHighlight(highlight: THREE.LineSegments, plane: THREE.Plane | null) {
+  if (!plane) {
+    highlight.visible = false;
+    return;
+  }
+  const points: THREE.Vector3[] = [];
+  content.traverse((child) => {
+    if (child instanceof THREE.Mesh) points.push(...meshPlaneIntersectionSegments(child, plane));
+  });
+  highlight.geometry.dispose();
+  highlight.geometry = new THREE.BufferGeometry().setFromPoints(points);
+  highlight.computeLineDistances();
+  highlight.visible = points.length > 0;
+}
 
 function contentBoundsCenter(): THREE.Vector3 | null {
   const box3 = new THREE.Box3().setFromObject(content);
@@ -321,7 +441,7 @@ type Tween = {
   start: number;
 };
 
-type PaneSeed = { position: THREE.Vector3; quaternion: THREE.Quaternion; target: THREE.Vector3 };
+type PaneSeed = { position: THREE.Vector3; quaternion: THREE.Quaternion; target: THREE.Vector3; clipPlaneId: string | null };
 
 // One pane = one independent camera + controls + gesture state, all sharing
 // the single `scene` above so every pane shows the same objects. Everything
@@ -346,6 +466,47 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   // any effect at all — the array itself is what actually turns clipping on.
   renderer.localClippingEnabled = true;
   container.appendChild(renderer.domElement);
+
+  // Cutting plane: which one (if any) this specific pane clips by — a
+  // per-pane choice, so split-view panes can each show a different section
+  // through the same shared content. See the selector control and
+  // setClipPlaneSelection/applyClipSelection below.
+  let selectedClipPlaneId: string | null = seed?.clipPlaneId ?? null;
+  let selectedClipPlane: THREE.Plane | null = null;
+  const { object: cutEdgeHighlight, layer: cutEdgeHighlightLayer } = createCutEdgeHighlight();
+  camera.layers.enable(cutEdgeHighlightLayer);
+
+  function applyClipSelection() {
+    const def = clipPlanes.find((p) => p.id === selectedClipPlaneId) ?? null;
+    selectedClipPlane = def ? def.plane : null;
+    updateCutEdgeHighlight(cutEdgeHighlight, selectedClipPlane);
+  }
+  applyClipSelection();
+
+  function setClipPlaneSelection(id: string | null) {
+    selectedClipPlaneId = id;
+    applyClipSelection();
+    refreshClipSelectorOptions();
+  }
+
+  // Small always-present per-pane control: a compact icon by default (see
+  // .pane-clip-selector's collapsed state in style.css), widening on hover/
+  // focus into a real dropdown of every defined plane plus "No cut".
+  const clipSelector = document.createElement('select');
+  clipSelector.className = 'pane-clip-selector';
+  clipSelector.setAttribute('aria-label', 'Cutting plane for this view');
+  container.appendChild(clipSelector);
+
+  function refreshClipSelectorOptions() {
+    const stillExists = clipPlanes.some((p) => p.id === selectedClipPlaneId);
+    clipSelector.innerHTML =
+      '<option value="">No cut</option>' + clipPlanes.map((p) => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('');
+    clipSelector.value = stillExists ? (selectedClipPlaneId ?? '') : '';
+    if (!stillExists && selectedClipPlaneId !== null) setClipPlaneSelection(null);
+  }
+  refreshClipSelectorOptions();
+
+  clipSelector.addEventListener('change', () => setClipPlaneSelection(clipSelector.value || null));
 
   // Camera controls: left = none (reserved for future selection/manipulation),
   // middle = pan, right = rotate (handled entirely by our own code below, see
@@ -704,7 +865,9 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     );
     raycaster.setFromCamera(ndc, camera);
 
-    const hit = raycaster.intersectObject(content, true)[0];
+    // Filtered to actual surfaces, not boxEdges' outline (see placeClipPlaneAt
+    // for why raycasting against Line/LineSegments picking is unreliable here).
+    const hit = raycaster.intersectObject(content, true).find((h) => h.object instanceof THREE.Mesh);
     if (hit) return { point: hit.point.clone(), hit: true };
     return { point: contentBoundsCenter() ?? controls.target.clone(), hit: false };
   }
@@ -853,19 +1016,27 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
 
   // Cutting-plane placement: while the dialog's "+ Add plane" flow is
   // waiting for a click (placementModeActive), a left-click anywhere on the
-  // model places a plane through that point, facing this pane's camera —
-  // matching "click a point, the plane goes through it, parallel to my
-  // viewing direction" rather than the nav cube's click-to-snap-view. Nav
-  // cube clicks are ignored entirely during placement, so the two never mix.
+  // model places a plane through that point, oriented to that pane's current
+  // viewing direction — matching "click a point, the plane goes through it,
+  // parallel to my viewing direction". Nav cube clicks are ignored entirely
+  // during placement, so the two never mix.
   function placeClipPlaneAt(clientX: number, clientY: number) {
     const rect = renderer.domElement.getBoundingClientRect();
     const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
     raycaster.setFromCamera(ndc, camera);
-    const hit = raycaster.intersectObject(content, true)[0];
+    // Filtered to actual surfaces: content also holds boxEdges (a LineSegments
+    // outline child of box), and Three.js's line-picking uses a generous
+    // screen-space threshold that can report an imprecise "hit" near an edge
+    // ahead of, or instead of, the real face intersection — silently placing
+    // the plane through the wrong point.
+    const hit = raycaster.intersectObject(content, true).find((h) => h.object instanceof THREE.Mesh);
     if (!hit) return;
     const point = hit.point.clone();
-    const normal = camera.position.clone().sub(point).normalize();
-    addClipPlane(point, normal);
+    // Kept side defaults to the far side (away from the camera), not the
+    // near one, so the newly-placed cut immediately shows the cross-section
+    // facing the viewer instead of just the same outer surface just clicked.
+    const normal = point.clone().sub(camera.position).normalize();
+    setClipPlaneSelection(addClipPlane(point, normal));
   }
 
   renderer.domElement.addEventListener('touchstart', (event) => {
@@ -953,7 +1124,7 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     // scenes, and would otherwise risk being clipped too if the active
     // plane's world-space position happened to fall within their own tiny
     // coordinate range.
-    renderer.clippingPlanes = activeClipPlaneId ? [sharedClipPlane] : [];
+    renderer.clippingPlanes = selectedClipPlane ? [selectedClipPlane] : [];
     renderer.render(scene, camera);
     renderer.clippingPlanes = [];
     renderNavCube();
@@ -964,6 +1135,9 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     controls.dispose();
     renderer.dispose();
     scene.remove(pivotIndicator);
+    scene.remove(cutEdgeHighlight);
+    cutEdgeHighlight.geometry.dispose();
+    (cutEdgeHighlight.material as THREE.Material).dispose();
     navMaterials.forEach((material) => {
       material.map?.dispose();
       material.dispose();
@@ -990,10 +1164,27 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   }
 
   function currentSeed(): PaneSeed {
-    return { position: camera.position.clone(), quaternion: camera.quaternion.clone(), target: controls.target.clone() };
+    return {
+      position: camera.position.clone(),
+      quaternion: camera.quaternion.clone(),
+      target: controls.target.clone(),
+      clipPlaneId: selectedClipPlaneId,
+    };
   }
 
-  return { container, camera, controls, resize, step, dispose, currentSeed, snapToView, hitTestNavCube };
+  return {
+    container,
+    camera,
+    controls,
+    resize,
+    step,
+    dispose,
+    currentSeed,
+    snapToView,
+    hitTestNavCube,
+    refreshClipSelectorOptions,
+    applyClipSelection,
+  };
 }
 
 type Pane = ReturnType<typeof createPane>;
@@ -1094,9 +1285,14 @@ axisGizmoBtn.addEventListener('click', () => {
   axisGizmoBtn.setAttribute('aria-label', label);
 });
 
-// Cutting-plane manager: dialog list (rename/select-active/align-to-axis/
-// flip/view/delete), the "+ Add plane" placement flow, and applying the
-// active plane to every pane's renderer (see step()'s clippingPlanes toggle).
+// Cutting-plane manager: the dialog is pure definition/management (rename,
+// align-to-axis, flip, delete) — which plane, if any, actually clips a given
+// view is chosen per-pane instead, via that pane's own selector control (see
+// createPane). Every mutation here that changes a plane's geometry or the
+// list itself refreshes every pane's selector options and re-applies
+// whichever plane each pane currently has selected, so panes showing an
+// edited plane update live and panes showing a since-deleted one fall back
+// to "No cut" (see refreshClipSelectorOptions).
 
 function escapeHtml(text: string): string {
   return text.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
@@ -1116,9 +1312,12 @@ function clipPlaneAlignmentKind(normal: THREE.Vector3): ClipPlaneAlignment {
   return 'custom';
 }
 
-function applyActiveClipPlane() {
-  const active = clipPlanes.find((p) => p.id === activeClipPlaneId);
-  if (active) sharedClipPlane.setFromNormalAndCoplanarPoint(active.normal, active.point);
+function refreshAllClipPlaneSelectors() {
+  panes.forEach((pane) => pane.refreshClipSelectorOptions());
+}
+
+function reapplyClipPlaneEverywhere() {
+  panes.forEach((pane) => pane.applyClipSelection());
 }
 
 function renderClipPlaneList() {
@@ -1129,7 +1328,6 @@ function renderClipPlaneList() {
       const activeClass = (k: ClipPlaneAlignment) => (k === kind ? ' active' : '');
       return `
     <li class="clip-plane-row" data-id="${p.id}">
-      <input type="radio" name="clip-plane-active" class="clip-plane-radio" ${p.id === activeClipPlaneId ? 'checked' : ''} aria-label="Enable ${escapeHtml(p.name)}" />
       <input type="text" class="clip-plane-name" value="${escapeHtml(p.name)}" aria-label="Plane name" />
       <span class="clip-plane-axis-btns">
         <button type="button" data-axis="x" class="${activeClass('x')}" title="Align to X axis">X</button>
@@ -1144,7 +1342,10 @@ function renderClipPlaneList() {
     .join('');
 }
 
-function addClipPlane(point: THREE.Vector3, normal: THREE.Vector3) {
+// Returns the new plane's id so the caller (placeClipPlaneAt) can select it
+// in the pane it was placed from — placing a plane doesn't touch any other
+// pane's selection.
+function addClipPlane(point: THREE.Vector3, normal: THREE.Vector3): string {
   const id = `plane-${nextClipPlaneNumber}`;
   const def: ClipPlaneDef = {
     id,
@@ -1152,14 +1353,16 @@ function addClipPlane(point: THREE.Vector3, normal: THREE.Vector3) {
     point: point.clone(),
     normal: normal.clone(),
     originalNormal: normal.clone(),
+    plane: new THREE.Plane(),
   };
+  refreshClipPlaneDef(def);
   nextClipPlaneNumber++;
   clipPlanes.push(def);
-  activeClipPlaneId = id;
-  applyActiveClipPlane();
   exitPlacementMode();
   clipPlaneDialog.hidden = false;
   renderClipPlaneList();
+  refreshAllClipPlaneSelectors();
+  return id;
 }
 
 function exitPlacementMode() {
@@ -1231,13 +1434,13 @@ clipPlaneList.addEventListener('change', (event) => {
   const row = target.closest<HTMLElement>('.clip-plane-row');
   if (!row) return;
   const id = row.dataset.id!;
-  if (target.classList.contains('clip-plane-radio')) {
-    activeClipPlaneId = id;
-    applyActiveClipPlane();
-  } else if (target.classList.contains('clip-plane-name')) {
+  if (target.classList.contains('clip-plane-name')) {
     const plane = clipPlanes.find((p) => p.id === id);
     const value = (target as HTMLInputElement).value.trim();
-    if (plane && value) plane.name = value;
+    if (plane && value) {
+      plane.name = value;
+      refreshAllClipPlaneSelectors();
+    }
   }
 });
 
@@ -1252,10 +1455,8 @@ clipPlaneList.addEventListener('click', (event) => {
 
   if (button.classList.contains('clip-plane-delete-btn')) {
     clipPlanes = clipPlanes.filter((p) => p.id !== id);
-    if (activeClipPlaneId === id) {
-      activeClipPlaneId = null;
-    }
     renderClipPlaneList();
+    refreshAllClipPlaneSelectors();
     return;
   }
 
@@ -1265,7 +1466,8 @@ clipPlaneList.addEventListener('click', (event) => {
   else if (axis === 'z') plane.normal.set(0, 0, 1);
   else if (axis === 'custom') plane.normal.copy(plane.originalNormal);
   else if (axis === 'flip') plane.normal.negate();
-  if (plane.id === activeClipPlaneId) applyActiveClipPlane();
+  refreshClipPlaneDef(plane);
+  reapplyClipPlaneEverywhere();
   renderClipPlaneList();
 });
 
