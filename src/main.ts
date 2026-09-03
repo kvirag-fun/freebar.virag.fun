@@ -318,6 +318,19 @@ function trianglePlaneIntersection(
 // coplanar face specifically.
 const CUT_HIGHLIGHT_OFFSET = 0.001;
 
+// Same margin, applied to the renderer's actual clipping plane (see
+// createPane's applyClipSelection) rather than just the highlight: a plane
+// exactly flush with a whole face — which every vertex of a box inevitably
+// is for an axis-aligned plane, so this is the routine case once point
+// snapping is involved, not a rare one — would otherwise clip that face's
+// own fragments right at the renderer's discard boundary, flickering them
+// in and out for the same floating-point reason CUT_HIGHLIGHT_OFFSET
+// exists. Nudging the kept side to extend slightly past the plane's true
+// position keeps clipping always live (so, e.g., snapping to the far
+// corner of a box really does discard nearly the whole thing, rather than
+// silently doing nothing) while avoiding that flicker.
+const CLIP_PLANE_KEEP_EPSILON = 0.001;
+
 // Every line segment where `plane` crosses `mesh`'s surface, in world space
 // — walks every triangle once, testing it against trianglePlaneIntersection.
 // Works for any triangle mesh (not just the placeholder box), so it keeps
@@ -388,14 +401,16 @@ function facesCoincidentWithPlane(root: THREE.Object3D, plane: THREE.Plane): THR
   return verts;
 }
 
-// A plane placed by clicking directly on a flat face is now oriented to
-// match that face exactly (see placeClipPlaneAt) - so its "cut" doesn't
-// slice through anything, it lies flush with a whole face. Clipping by such
-// a plane is a no-op (or, normal-flipped, discards the entire mesh), but
-// either way that flush face sits exactly on the clip boundary, where
-// floating-point rounding in the renderer's per-fragment distance test
-// flickers it in and out the same way an un-nudged cut highlight would (see
-// CUT_HIGHLIGHT_OFFSET above) - with no cut to show for the trouble.
+// True when `plane` lies flush with a whole face rather than genuinely
+// slicing through anything — e.g. a plane placed by clicking directly on a
+// flat face (see placeClipPlaneAt), or one whose marker has been snapped to
+// a vertex/midpoint that happens to sit on one of the model's own faces,
+// which for an axis-aligned plane against a box is every vertex, not a rare
+// case. Used only to skip the cut-edge highlight for such a plane (see
+// applyClipSelection) — that face is already outlined by its own real
+// edges, so a redundant dashed line tracing the same boundary would be
+// confusing, not useful. Clipping itself is never skipped this way; see
+// CLIP_PLANE_KEEP_EPSILON for how it stays flicker-free without that.
 function planeCoincidesWithAFace(root: THREE.Object3D, plane: THREE.Plane): boolean {
   return facesCoincidentWithPlane(root, plane).length > 0;
 }
@@ -790,6 +805,11 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   // setClipPlaneSelection/applyClipSelection below.
   let selectedClipPlaneId: string | null = seed?.clipPlaneId ?? null;
   let selectedClipPlane: THREE.Plane | null = null;
+  // Scratch object applyClipSelection rewrites in place — CLIP_PLANE_KEEP_EPSILON
+  // nudged from the selected def's actual plane, never the def's own plane
+  // directly, so def.plane stays exact for other uses (the coincidence
+  // check below, the marker/highlight geometry, etc).
+  const effectiveClipPlane = new THREE.Plane();
   const { object: cutEdgeHighlight, layer: cutEdgeHighlightLayer } = createCutEdgeHighlight();
   camera.layers.enable(cutEdgeHighlightLayer);
   camera.layers.enable(MARKER_LAYER);
@@ -841,10 +861,19 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
 
   function applyClipSelection() {
     const def = clipPlanes.find((p) => p.id === selectedClipPlaneId) ?? null;
-    // Hide (skip clipping by) a plane that's flush with a whole face rather
-    // than actually cutting through the model — see planeCoincidesWithAFace.
-    selectedClipPlane = def && !planeCoincidesWithAFace(content, def.plane) ? def.plane : null;
-    updateCutEdgeHighlight(cutEdgeHighlight, selectedClipPlane);
+    if (def) {
+      effectiveClipPlane.copy(def.plane);
+      effectiveClipPlane.constant += CLIP_PLANE_KEEP_EPSILON;
+      selectedClipPlane = effectiveClipPlane;
+    } else {
+      selectedClipPlane = null;
+    }
+    // The cut-edge highlight is skipped (not the clip itself, see above)
+    // when the plane is flush with a whole face — that face is already
+    // outlined by its own real edges, so a dashed "cut" boundary tracing
+    // the exact same line would only be redundant/confusing, not useful.
+    const highlightPlane = def && !planeCoincidesWithAFace(content, def.plane) ? def.plane : null;
+    updateCutEdgeHighlight(cutEdgeHighlight, highlightPlane);
   }
   applyClipSelection();
 
@@ -1506,6 +1535,30 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   // The closest enabled snap candidate to the cursor, in screen space,
   // within SNAP_PIXEL_RADIUS — or null if snapping is off, nothing was
   // cached (see the pointerdown handler above), or nothing is close enough.
+  // False for a candidate currently on the far side of other geometry (a
+  // ray from the camera to it hits something closer first) or clipped away
+  // by this pane's own active plane — either way, not something visible to
+  // snap to right now, even though collectSnapCandidates has no idea which
+  // pane, camera angle, or clip state it'll be used against when it builds
+  // the full list once at arm-time.
+  function isCandidateVisible(point: THREE.Vector3): boolean {
+    if (selectedClipPlane && selectedClipPlane.distanceToPoint(point) < -1e-6) return false;
+    const toPoint = point.clone().sub(camera.position);
+    const distance = toPoint.length();
+    if (distance < 1e-6) return true;
+    raycaster.set(camera.position, toPoint.normalize());
+    const savedNear = raycaster.near;
+    const savedFar = raycaster.far;
+    raycaster.near = 0;
+    raycaster.far = distance - 1e-3;
+    const blocked = raycaster
+      .intersectObject(content, true)
+      .some((h) => h.object instanceof THREE.Mesh && (!selectedClipPlane || selectedClipPlane.distanceToPoint(h.point) >= -1e-6));
+    raycaster.near = savedNear;
+    raycaster.far = savedFar;
+    return !blocked;
+  }
+
   function findSnapPoint(clientX: number, clientY: number): THREE.Vector3 | null {
     if (!snapCandidateCache || (!snapToVertices && !snapToEdgeMidpoints)) return null;
     const candidates = [
@@ -1515,6 +1568,7 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     let best: THREE.Vector3 | null = null;
     let bestDist = SNAP_PIXEL_RADIUS;
     for (const candidate of candidates) {
+      if (!isCandidateVisible(candidate)) continue;
       const screen = worldToScreen(candidate);
       const dist = Math.hypot(screen.x - clientX, screen.y - clientY);
       if (dist < bestDist) {
