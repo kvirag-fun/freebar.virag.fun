@@ -546,19 +546,14 @@ function createSnapHighlightTexture(): THREE.Texture {
 // currently locked onto (see findSnapPoint). A Sprite always faces the
 // camera on its own, unlike the torus mesh this replaced, so step() no
 // longer needs to billboard it manually — only rescale it (see
-// MARKER_SCREEN_SCALE) and give it its gentle pulse. Same always-on-top,
-// own-layer treatment as createDragGuideLine, and for the same reason.
+// MARKER_SCREEN_SCALE). Same always-on-top, own-layer treatment as
+// createDragGuideLine, and for the same reason.
 // 4.4x a unit marker's radius (the texture's glow already fades out well
 // before the sprite's own edge, so this reads as roughly the same ring
 // size the old 2.2x-radius torus did) — rescaled the same
-// distance * MARKER_SCREEN_SCALE way as the point markers in step() (see
-// the pulse constants below for the extra breathing factor on top), so it
+// distance * MARKER_SCREEN_SCALE way as the point markers in step(), so it
 // stays proportionate to a marker's own on-screen radius at any zoom.
 const SNAP_HIGHLIGHT_SCALE = 4.4;
-// A slow, subtle "breathing" pulse (±10% size, one full cycle roughly every
-// 1.6s) rather than a static ring — see step()'s snapHighlight block.
-const SNAP_HIGHLIGHT_PULSE_AMOUNT = 0.1;
-const SNAP_HIGHLIGHT_PULSE_SPEED = (2 * Math.PI) / 1600;
 function createSnapHighlight(): { object: THREE.Sprite; layer: number } {
   const layer = nextClipHighlightLayer++;
   const object = new THREE.Sprite(
@@ -1777,11 +1772,9 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     // faces the camera on its own, unlike the torus mesh this replaced) —
     // recomputed every frame rather than only on pointermove, so it doesn't
     // lag behind if the camera moves (zoom, orbit) without the mouse also
-    // moving. The gentle breathing pulse on top is purely decorative, to
-    // read as "actively locked on" rather than a static decal.
+    // moving.
     if (snapHighlight.visible) {
-      const pulse = 1 + SNAP_HIGHLIGHT_PULSE_AMOUNT * Math.sin(performance.now() * SNAP_HIGHLIGHT_PULSE_SPEED);
-      const scale = camera.position.distanceTo(snapHighlight.position) * MARKER_SCREEN_SCALE * SNAP_HIGHLIGHT_SCALE * pulse;
+      const scale = camera.position.distanceTo(snapHighlight.position) * MARKER_SCREEN_SCALE * SNAP_HIGHLIGHT_SCALE;
       snapHighlight.scale.setScalar(scale);
     }
 
