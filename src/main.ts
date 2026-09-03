@@ -92,10 +92,17 @@ function closeSnapDialog() {
 // Built from each mesh's own EdgesGeometry (the same notion of "edge" as
 // the solid white real-edge highlight, e.g. boxEdges) rather than every
 // triangle edge, so a flat face's diagonal split doesn't produce a
-// meaningless extra midpoint down its middle.
-function collectSnapCandidates(root: THREE.Object3D): { vertices: THREE.Vector3[]; midpoints: THREE.Vector3[] } {
+// meaningless extra midpoint down its middle. `segments` is the same edges,
+// undeduplicated and paired (two points per edge), for createPane's
+// hiddenEdgesOverlay to draw directly as a LineSegments geometry.
+function collectSnapCandidates(root: THREE.Object3D): {
+  vertices: THREE.Vector3[];
+  midpoints: THREE.Vector3[];
+  segments: THREE.Vector3[];
+} {
   const vertexByKey = new Map<string, THREE.Vector3>();
   const midpoints: THREE.Vector3[] = [];
+  const segments: THREE.Vector3[] = [];
   const vecKey = (v: THREE.Vector3) => `${v.x.toFixed(5)},${v.y.toFixed(5)},${v.z.toFixed(5)}`;
   root.traverse((child) => {
     if (!(child instanceof THREE.Mesh)) return;
@@ -109,10 +116,11 @@ function collectSnapCandidates(root: THREE.Object3D): { vertices: THREE.Vector3[
       if (!vertexByKey.has(keyA)) vertexByKey.set(keyA, a);
       if (!vertexByKey.has(keyB)) vertexByKey.set(keyB, b);
       midpoints.push(a.clone().lerp(b, 0.5));
+      segments.push(a, b);
     }
     edges.dispose();
   });
-  return { vertices: [...vertexByKey.values()], midpoints };
+  return { vertices: [...vertexByKey.values()], midpoints, segments };
 }
 
 const scene = new THREE.Scene();
@@ -519,6 +527,29 @@ function createSnapHighlight(): { object: THREE.Mesh; layer: number } {
   return { object, layer };
 }
 
+// Every real edge of the model, dimly visible through occluding geometry
+// while a plane's marker is being repositioned (see createPane's
+// hiddenEdgesOverlay/stepClipPlaneMove) — hard-to-reference vertices/edges
+// on the far side of the model, or already clipped away, otherwise give no
+// visual cue of where they are while deciding where to move the plane to.
+// depthTest off deliberately shows it through anything nearer, unlike
+// boxEdges' own solid line (which stays properly occluded, per usual, for
+// the parts already visible without help); low opacity keeps it from
+// fighting with boxEdges for the parts that were already visible anyway.
+const HIDDEN_EDGES_OVERLAY_OPACITY = 0.25;
+function createHiddenEdgesOverlay(): { object: THREE.LineSegments; layer: number } {
+  const layer = nextClipHighlightLayer++;
+  const object = new THREE.LineSegments(
+    new THREE.BufferGeometry(),
+    new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: HIDDEN_EDGES_OVERLAY_OPACITY, depthTest: false }),
+  );
+  object.renderOrder = 998;
+  object.visible = false;
+  object.layers.set(layer);
+  scene.add(object);
+  return { object, layer };
+}
+
 // Standard closest-point-between-two-skew-lines, used to drag a plane's
 // point along its own normal (the "line") to track the mouse ray as closely
 // as a straight 1D constraint can — the same technique a 3D editor's
@@ -843,6 +874,13 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   // dragGuideLine, for the same reason (it sits on the model's own surface).
   const { object: snapHighlight, layer: snapHighlightLayer } = createSnapHighlight();
 
+  // Dim reference wireframe of the model's real edges, shown only while a
+  // plane's marker is being repositioned (see the pointerup handler and
+  // cancelClipPlaneMove below) — same "own layer, second pass only"
+  // treatment as dragGuideLine, so it isn't clipped away by whichever plane
+  // is currently applied.
+  const { object: hiddenEdgesOverlay, layer: hiddenEdgesOverlayLayer } = createHiddenEdgesOverlay();
+
   // Non-null while a plane's marker is being repositioned: click once on a
   // marker to arm it (every pointermove from then on live-previews the
   // plane sliding along its own normal — see stepClipPlaneMove), click again
@@ -857,7 +895,7 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   const clipPlaneMoveOriginalPoint = new THREE.Vector3();
   // Populated when a move is armed, cleared when it ends — see the
   // pointerup handler below and findSnapPoint.
-  let snapCandidateCache: { vertices: THREE.Vector3[]; midpoints: THREE.Vector3[] } | null = null;
+  let snapCandidateCache: ReturnType<typeof collectSnapCandidates> | null = null;
 
   function applyClipSelection() {
     const def = clipPlanes.find((p) => p.id === selectedClipPlaneId) ?? null;
@@ -1408,6 +1446,7 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
         movingClipPlaneId = null;
         snapCandidateCache = null;
         snapHighlight.visible = false;
+        hiddenEdgesOverlay.visible = false;
         return;
       }
       if (placementModeActive) {
@@ -1428,6 +1467,9 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
         // doesn't change mid-move, so there's nothing to gain from redoing
         // this per frame (see findSnapPoint).
         snapCandidateCache = collectSnapCandidates(content);
+        hiddenEdgesOverlay.geometry.dispose();
+        hiddenEdgesOverlay.geometry = new THREE.BufferGeometry().setFromPoints(snapCandidateCache.segments);
+        hiddenEdgesOverlay.visible = true;
         return;
       }
       const dir = hitTestNavCube(event.clientX, event.clientY);
@@ -1773,6 +1815,7 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     camera.layers.set(MARKER_LAYER);
     camera.layers.enable(dragGuideLineLayer);
     camera.layers.enable(snapHighlightLayer);
+    camera.layers.enable(hiddenEdgesOverlayLayer);
     scene.background = null;
     renderer.render(scene, camera);
     scene.background = backgroundBefore;
@@ -1801,6 +1844,9 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     scene.remove(snapHighlight);
     snapHighlight.geometry.dispose();
     (snapHighlight.material as THREE.Material).dispose();
+    scene.remove(hiddenEdgesOverlay);
+    hiddenEdgesOverlay.geometry.dispose();
+    (hiddenEdgesOverlay.material as THREE.Material).dispose();
     navMaterials.forEach((material) => {
       material.map?.dispose();
       material.dispose();
@@ -1867,6 +1913,7 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
       snapCandidateCache = null;
       snapHighlight.visible = false;
       dragGuideLine.visible = false;
+      hiddenEdgesOverlay.visible = false;
     },
   };
 }
