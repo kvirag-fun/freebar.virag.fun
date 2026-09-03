@@ -67,13 +67,13 @@ function refreshClipPlaneDef(def: ClipPlaneDef) {
 
 // Point snapping: a general-purpose "snap to a vertex or edge midpoint of
 // the model" toggle, managed from its own header dialog (see the snap-*
-// consts and openSnapDialog/closeSnapDialog below) — off by default, and
-// currently only consulted while dragging a cutting plane's marker (see
-// createPane's stepClipPlaneMove/findSnapPoint), though the toggle itself
-// isn't specific to that interaction and is meant to be reused by other
-// drag interactions later.
-let snapToVertices = false;
-let snapToEdgeMidpoints = false;
+// consts and openSnapDialog/closeSnapDialog below) — on by default, and
+// currently only consulted while repositioning a cutting plane's marker
+// (see createPane's stepClipPlaneMove/findSnapPoint), though the toggle
+// itself isn't specific to that interaction and is meant to be reused by
+// other drag interactions later.
+let snapToVertices = true;
+let snapToEdgeMidpoints = true;
 // How close the cursor has to land, in screen pixels, to a candidate's
 // projected position before a drag snaps to it — see createPane's
 // findSnapPoint.
