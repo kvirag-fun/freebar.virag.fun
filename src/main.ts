@@ -18,6 +18,14 @@ const clipPlaneAddBtn = document.querySelector<HTMLButtonElement>('#clip-plane-a
 const clipPlaneBanner = document.querySelector<HTMLElement>('#clip-plane-banner')!;
 const clipPlaneCancelBtn = document.querySelector<HTMLButtonElement>('#clip-plane-cancel-btn')!;
 
+const snapBtn = document.querySelector<HTMLButtonElement>('#snap-btn')!;
+const snapDialog = document.querySelector<HTMLElement>('#snap-dialog')!;
+const snapDialogPanel = document.querySelector<HTMLElement>('#snap-dialog .modal-panel')!;
+const snapDialogHeader = document.querySelector<HTMLElement>('#snap-dialog .modal-header')!;
+const snapCloseBtn = document.querySelector<HTMLButtonElement>('#snap-close-btn')!;
+const snapVertexCheckbox = document.querySelector<HTMLInputElement>('#snap-vertex-checkbox')!;
+const snapMidpointCheckbox = document.querySelector<HTMLInputElement>('#snap-midpoint-checkbox')!;
+
 // Shared across every pane, so one button hides/shows the cube/axes everywhere at once.
 // The nav cube cycles full -> mini -> off -> full: "mini" renders small and
 // schematic, expanding to full size/detail on hover (see createPane).
@@ -55,6 +63,56 @@ let placementModeActive = false;
 
 function refreshClipPlaneDef(def: ClipPlaneDef) {
   def.plane.setFromNormalAndCoplanarPoint(def.normal, def.point);
+}
+
+// Point snapping: a general-purpose "snap to a vertex or edge midpoint of
+// the model" toggle, managed from its own header dialog (see the snap-*
+// consts and openSnapDialog/closeSnapDialog below) — off by default, and
+// currently only consulted while dragging a cutting plane's marker (see
+// createPane's stepClipPlaneDrag/findSnapPoint), though the toggle itself
+// isn't specific to that interaction and is meant to be reused by other
+// drag interactions later.
+let snapToVertices = false;
+let snapToEdgeMidpoints = false;
+// How close the cursor has to land, in screen pixels, to a candidate's
+// projected position before a drag snaps to it — see createPane's
+// findSnapPoint.
+const SNAP_PIXEL_RADIUS = 18;
+
+function openSnapDialog() {
+  snapDialog.hidden = false;
+}
+
+function closeSnapDialog() {
+  snapDialog.hidden = true;
+}
+
+// Every vertex and edge midpoint of content's actual (real, non-generated)
+// edges, in world space — the candidate set findSnapPoint chooses from.
+// Built from each mesh's own EdgesGeometry (the same notion of "edge" as
+// the solid white real-edge highlight, e.g. boxEdges) rather than every
+// triangle edge, so a flat face's diagonal split doesn't produce a
+// meaningless extra midpoint down its middle.
+function collectSnapCandidates(root: THREE.Object3D): { vertices: THREE.Vector3[]; midpoints: THREE.Vector3[] } {
+  const vertexByKey = new Map<string, THREE.Vector3>();
+  const midpoints: THREE.Vector3[] = [];
+  const vecKey = (v: THREE.Vector3) => `${v.x.toFixed(5)},${v.y.toFixed(5)},${v.z.toFixed(5)}`;
+  root.traverse((child) => {
+    if (!(child instanceof THREE.Mesh)) return;
+    const edges = new THREE.EdgesGeometry(child.geometry);
+    const positions = edges.getAttribute('position');
+    for (let i = 0; i < positions.count; i += 2) {
+      const a = new THREE.Vector3().fromBufferAttribute(positions, i).applyMatrix4(child.matrixWorld);
+      const b = new THREE.Vector3().fromBufferAttribute(positions, i + 1).applyMatrix4(child.matrixWorld);
+      const keyA = vecKey(a);
+      const keyB = vecKey(b);
+      if (!vertexByKey.has(keyA)) vertexByKey.set(keyA, a);
+      if (!vertexByKey.has(keyB)) vertexByKey.set(keyB, b);
+      midpoints.push(a.clone().lerp(b, 0.5));
+    }
+    edges.dispose();
+  });
+  return { vertices: [...vertexByKey.values()], midpoints };
 }
 
 const scene = new THREE.Scene();
@@ -731,6 +789,9 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   let draggingClipPlaneId: string | null = null;
   const dragLineAnchor = new THREE.Vector3();
   const dragLineDir = new THREE.Vector3();
+  // Populated at drag-start, cleared at drag-end — see the pointerdown/up
+  // handlers below and findSnapPoint.
+  let snapCandidateCache: { vertices: THREE.Vector3[]; midpoints: THREE.Vector3[] } | null = null;
 
   function applyClipSelection() {
     const def = clipPlanes.find((p) => p.id === selectedClipPlaneId) ?? null;
@@ -1241,6 +1302,10 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
         draggingClipPlaneId = def.id;
         dragLineAnchor.copy(def.point);
         dragLineDir.copy(def.normal);
+        // Computed once per drag rather than every pointermove — content
+        // doesn't change mid-drag, so there's nothing to gain from redoing
+        // this per frame (see findSnapPoint).
+        snapCandidateCache = collectSnapCandidates(content);
       }
     }
   });
@@ -1286,6 +1351,7 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     } else if (event.button === 0) {
       if (draggingClipPlaneId) {
         draggingClipPlaneId = null;
+        snapCandidateCache = null;
         return;
       }
       if (placementModeActive) {
@@ -1390,6 +1456,38 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   // along it sits, so this is exactly the offset that was otherwise missing
   // for pushing a face-flush plane (see planeCoincidesWithAFace) into the
   // model to get an actual cut.
+  // Projects a world point to this pane's own screen (client) coordinates —
+  // the inverse of the NDC conversion used everywhere else in this file —
+  // so findSnapPoint can compare a candidate's on-screen position to the
+  // cursor in the same pixel space clientX/clientY already are.
+  function worldToScreen(point: THREE.Vector3): { x: number; y: number } {
+    const rect = renderer.domElement.getBoundingClientRect();
+    const ndc = point.clone().project(camera);
+    return { x: rect.left + ((ndc.x + 1) / 2) * rect.width, y: rect.top + ((1 - ndc.y) / 2) * rect.height };
+  }
+
+  // The closest enabled snap candidate to the cursor, in screen space,
+  // within SNAP_PIXEL_RADIUS — or null if snapping is off, nothing was
+  // cached (see the pointerdown handler above), or nothing is close enough.
+  function findSnapPoint(clientX: number, clientY: number): THREE.Vector3 | null {
+    if (!snapCandidateCache || (!snapToVertices && !snapToEdgeMidpoints)) return null;
+    const candidates = [
+      ...(snapToVertices ? snapCandidateCache.vertices : []),
+      ...(snapToEdgeMidpoints ? snapCandidateCache.midpoints : []),
+    ];
+    let best: THREE.Vector3 | null = null;
+    let bestDist = SNAP_PIXEL_RADIUS;
+    for (const candidate of candidates) {
+      const screen = worldToScreen(candidate);
+      const dist = Math.hypot(screen.x - clientX, screen.y - clientY);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = candidate;
+      }
+    }
+    return best;
+  }
+
   function stepClipPlaneDrag(clientX: number, clientY: number) {
     if (!draggingClipPlaneId) return;
     const def = clipPlanes.find((p) => p.id === draggingClipPlaneId);
@@ -1397,14 +1495,23 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
       draggingClipPlaneId = null;
       return;
     }
-    const rect = renderer.domElement.getBoundingClientRect();
-    const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
-    raycaster.setFromCamera(ndc, camera);
-    const closest = closestPointOnLineToRay(dragLineAnchor, dragLineDir, raycaster.ray.origin, raycaster.ray.direction);
-    // Mirrored through the drag-start point: the raw closest-point mapping
-    // ran backwards from what felt natural while dragging, so every frame's
-    // result is reflected through the anchor to reverse it.
-    def.point.copy(dragLineAnchor).multiplyScalar(2).sub(closest);
+    const snapTarget = findSnapPoint(clientX, clientY);
+    if (snapTarget) {
+      // Projects the snapped-to point onto the plane's own normal line —
+      // the one position along it that puts the plane exactly through that
+      // vertex/midpoint — rather than through the ray-based mapping below,
+      // which snapping bypasses entirely.
+      def.point.copy(dragLineAnchor).addScaledVector(dragLineDir, dragLineDir.dot(snapTarget.clone().sub(dragLineAnchor)));
+    } else {
+      const rect = renderer.domElement.getBoundingClientRect();
+      const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+      raycaster.setFromCamera(ndc, camera);
+      const closest = closestPointOnLineToRay(dragLineAnchor, dragLineDir, raycaster.ray.origin, raycaster.ray.direction);
+      // Mirrored through the drag-start point: the raw closest-point mapping
+      // ran backwards from what felt natural while dragging, so every
+      // frame's result is reflected through the anchor to reverse it.
+      def.point.copy(dragLineAnchor).multiplyScalar(2).sub(closest);
+    }
     refreshClipPlaneDef(def);
     reapplyClipPlaneEverywhere();
     refreshClipPointMarkers();
@@ -1833,36 +1940,59 @@ clipPlaneCloseBtn.addEventListener('click', () => {
   closeClipPlaneDialog();
 });
 
-// Draggable by its title bar, since the dialog can otherwise land over
+// Draggable by its title bar, since a dialog can otherwise land over
 // whatever part of the model the user most needs to see — the panel is
 // pulled out of the overlay's centering flex layout into position: fixed
 // on the first drag, then just repositioned on every drag after that
-// (including ones after the dialog's been closed and reopened).
-let clipDialogDragOffset: { x: number; y: number } | null = null;
+// (including ones after the dialog's been closed and reopened). Shared by
+// every modal dialog (see the clip-plane and snap dialogs' calls below)
+// rather than duplicated per-dialog state/listeners.
+function makeDialogDraggable(panel: HTMLElement, header: HTMLElement) {
+  let dragOffset: { x: number; y: number } | null = null;
 
-clipPlaneDialogHeader.addEventListener('pointerdown', (event) => {
-  if ((event.target as HTMLElement).closest('button')) return;
-  const rect = clipPlaneDialogPanel.getBoundingClientRect();
-  clipDialogDragOffset = { x: event.clientX - rect.left, y: event.clientY - rect.top };
-  clipPlaneDialogPanel.style.position = 'fixed';
-  clipPlaneDialogPanel.style.margin = '0';
-  clipPlaneDialogPanel.style.left = `${rect.left}px`;
-  clipPlaneDialogPanel.style.top = `${rect.top}px`;
-  clipPlaneDialogHeader.setPointerCapture(event.pointerId);
+  header.addEventListener('pointerdown', (event) => {
+    if ((event.target as HTMLElement).closest('button')) return;
+    const rect = panel.getBoundingClientRect();
+    dragOffset = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    panel.style.position = 'fixed';
+    panel.style.margin = '0';
+    panel.style.left = `${rect.left}px`;
+    panel.style.top = `${rect.top}px`;
+    header.setPointerCapture(event.pointerId);
+  });
+
+  header.addEventListener('pointermove', (event) => {
+    if (!dragOffset) return;
+    const maxLeft = Math.max(0, window.innerWidth - panel.offsetWidth);
+    const maxTop = Math.max(0, window.innerHeight - panel.offsetHeight);
+    const left = THREE.MathUtils.clamp(event.clientX - dragOffset.x, 0, maxLeft);
+    const top = THREE.MathUtils.clamp(event.clientY - dragOffset.y, 0, maxTop);
+    panel.style.left = `${left}px`;
+    panel.style.top = `${top}px`;
+  });
+
+  header.addEventListener('pointerup', () => {
+    dragOffset = null;
+  });
+}
+
+makeDialogDraggable(clipPlaneDialogPanel, clipPlaneDialogHeader);
+makeDialogDraggable(snapDialogPanel, snapDialogHeader);
+
+snapBtn.addEventListener('click', () => {
+  openSnapDialog();
 });
 
-clipPlaneDialogHeader.addEventListener('pointermove', (event) => {
-  if (!clipDialogDragOffset) return;
-  const maxLeft = Math.max(0, window.innerWidth - clipPlaneDialogPanel.offsetWidth);
-  const maxTop = Math.max(0, window.innerHeight - clipPlaneDialogPanel.offsetHeight);
-  const left = THREE.MathUtils.clamp(event.clientX - clipDialogDragOffset.x, 0, maxLeft);
-  const top = THREE.MathUtils.clamp(event.clientY - clipDialogDragOffset.y, 0, maxTop);
-  clipPlaneDialogPanel.style.left = `${left}px`;
-  clipPlaneDialogPanel.style.top = `${top}px`;
+snapCloseBtn.addEventListener('click', () => {
+  closeSnapDialog();
 });
 
-clipPlaneDialogHeader.addEventListener('pointerup', () => {
-  clipDialogDragOffset = null;
+snapVertexCheckbox.addEventListener('change', () => {
+  snapToVertices = snapVertexCheckbox.checked;
+});
+
+snapMidpointCheckbox.addEventListener('change', () => {
+  snapToEdgeMidpoints = snapMidpointCheckbox.checked;
 });
 
 clipPlaneAddBtn.addEventListener('click', () => {

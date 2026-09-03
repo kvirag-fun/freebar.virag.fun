@@ -236,6 +236,20 @@ html, body {
   color: rgba(42, 42, 40, 0.6);
 }
 
+/* Point-snapping dialog checkboxes */
+.snap-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  font: 13px/1.4 sans-serif;
+  cursor: pointer;
+}
+
+.snap-option input {
+  cursor: pointer;
+}
+
 .clip-plane-list {
   list-style: none;
   margin: 0 0 12px;
