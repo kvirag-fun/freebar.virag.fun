@@ -1577,30 +1577,10 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   // The closest enabled snap candidate to the cursor, in screen space,
   // within SNAP_PIXEL_RADIUS — or null if snapping is off, nothing was
   // cached (see the pointerdown handler above), or nothing is close enough.
-  // False for a candidate currently on the far side of other geometry (a
-  // ray from the camera to it hits something closer first) or clipped away
-  // by this pane's own active plane — either way, not something visible to
-  // snap to right now, even though collectSnapCandidates has no idea which
-  // pane, camera angle, or clip state it'll be used against when it builds
-  // the full list once at arm-time.
-  function isCandidateVisible(point: THREE.Vector3): boolean {
-    if (selectedClipPlane && selectedClipPlane.distanceToPoint(point) < -1e-6) return false;
-    const toPoint = point.clone().sub(camera.position);
-    const distance = toPoint.length();
-    if (distance < 1e-6) return true;
-    raycaster.set(camera.position, toPoint.normalize());
-    const savedNear = raycaster.near;
-    const savedFar = raycaster.far;
-    raycaster.near = 0;
-    raycaster.far = distance - 1e-3;
-    const blocked = raycaster
-      .intersectObject(content, true)
-      .some((h) => h.object instanceof THREE.Mesh && (!selectedClipPlane || selectedClipPlane.distanceToPoint(h.point) >= -1e-6));
-    raycaster.near = savedNear;
-    raycaster.far = savedFar;
-    return !blocked;
-  }
-
+  // Deliberately doesn't care whether a candidate is currently occluded or
+  // clipped away: hiddenEdgesOverlay shows the model's hidden vertices and
+  // edges dimly for exactly this reason while a move is armed, so they're
+  // just as legitimate a snap target as a visible one, not a lesser one.
   function findSnapPoint(clientX: number, clientY: number): THREE.Vector3 | null {
     if (!snapCandidateCache || (!snapToVertices && !snapToEdgeMidpoints)) return null;
     const candidates = [
@@ -1610,7 +1590,6 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     let best: THREE.Vector3 | null = null;
     let bestDist = SNAP_PIXEL_RADIUS;
     for (const candidate of candidates) {
-      if (!isCandidateVisible(candidate)) continue;
       const screen = worldToScreen(candidate);
       const dist = Math.hypot(screen.x - clientX, screen.y - clientY);
       if (dist < bestDist) {
