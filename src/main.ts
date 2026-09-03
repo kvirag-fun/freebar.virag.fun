@@ -142,23 +142,27 @@ function createCutEdgeHighlight(): { object: THREE.LineSegments; layer: number }
 
 // Small red sphere marking a clicked-and-committed plane point (see
 // makePointMarker) or, during placement, a live preview of where the next
-// click would land (see createPane's placementHoverMarker). Normal
-// depthTest, so it reads as sitting on the surface — hidden behind other
-// geometry the same way the surface itself would be — rather than an
-// always-on-top UI overlay. It sits at the exact plane point, so — unlike
-// the boundary highlight, which is nudged just enough to survive the clip
-// test on the kept side — the active clipping plane would slice it clean in
-// half; every pane renders MARKER_LAYER in a second, unclipped pass instead
-// (see step()) so markers always show whole regardless of which plane is
-// currently cutting.
+// click would land (see createPane's placementHoverMarker). depthTest is
+// off, so it always draws on top rather than being hidden behind nearer
+// geometry the way the surface itself would be — needed because rotating
+// the view to reach a good dragging angle (see stepClipPlaneDrag) can
+// easily put the marker on the far side of the model from the new camera
+// position, and it has to stay visible/grabbable there rather than
+// disappear behind the very geometry its plane is cutting. It also sits at
+// the exact plane point, so — unlike the boundary highlight, which is
+// nudged just enough to survive the clip test on the kept side — the
+// active clipping plane would slice it clean in half; every pane renders
+// MARKER_LAYER in a second, unclipped pass instead (see step()) so markers
+// always show whole regardless of which plane is currently cutting.
 const MARKER_LAYER = 10;
 const CLIP_POINT_MARKER_COLOR = 0xff3b30;
 const CLIP_POINT_MARKER_RADIUS = 0.035;
 function makePointMarker(): THREE.Mesh {
   const mesh = new THREE.Mesh(
     new THREE.SphereGeometry(CLIP_POINT_MARKER_RADIUS, 12, 12),
-    new THREE.MeshBasicMaterial({ color: CLIP_POINT_MARKER_COLOR }),
+    new THREE.MeshBasicMaterial({ color: CLIP_POINT_MARKER_COLOR, transparent: true, depthTest: false }),
   );
+  mesh.renderOrder = 1000;
   mesh.visible = false;
   mesh.layers.set(MARKER_LAYER);
   return mesh;
@@ -1529,11 +1533,12 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
 
     // Point markers sit exactly on their plane, so the clip above would slice
     // them clean in half — drawn again here, restricted to just that layer,
-    // with clipping off and the depth buffer from the pass above already in
-    // place (so they're still hidden behind nearer real geometry, just never
-    // by the plane they mark). scene.background has to be cleared first:
-    // WebGLRenderer repaints it at the start of every render() call
-    // regardless of autoClear, which would otherwise blank out the pass above.
+    // with clipping off (their own depthTest:false, see makePointMarker,
+    // separately keeps them from being hidden behind nearer real geometry
+    // too, on purpose — see there for why). scene.background has to be
+    // cleared first: WebGLRenderer repaints it at the start of every
+    // render() call regardless of autoClear, which would otherwise blank
+    // out the pass above.
     const layersBefore = camera.layers.mask;
     const backgroundBefore = scene.background;
     camera.layers.set(MARKER_LAYER);
