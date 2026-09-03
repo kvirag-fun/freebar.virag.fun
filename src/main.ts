@@ -1345,15 +1345,9 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     navCubeHovering = pointerOverNavCubeRegion(event.clientX, event.clientY);
     updatePlacementHoverMarker(event.clientX, event.clientY);
     stepClipPlaneMove(event.clientX, event.clientY);
-    const markerHover = updateMarkerHoverAffordance(event.clientX, event.clientY);
+    updateMarkerHoverAffordance(event.clientX, event.clientY);
     if (!orbit.active && !isPanning) {
-      renderer.domElement.style.cursor = movingClipPlaneId
-        ? ''
-        : markerHover
-          ? 'grab'
-          : navCubeHovering && navCubeShowingFull()
-            ? 'pointer'
-            : '';
+      renderer.domElement.style.cursor = navCubeHovering && navCubeShowingFull() ? 'pointer' : '';
     }
   });
   renderer.domElement.addEventListener('pointerleave', () => {
@@ -1572,28 +1566,27 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   }
 
   // Shows the drag guide line on whichever plane's marker is hovered or
-  // currently being repositioned, and reports whether the cursor should
-  // read as clickable — the caller folds that into its single cursor
-  // decision so this doesn't fight with the nav-cube-hover cursor logic
-  // below.
-  function updateMarkerHoverAffordance(clientX: number, clientY: number): boolean {
+  // currently being repositioned. Deliberately doesn't touch the cursor —
+  // it stays whatever it already was (see the pointermove handler below),
+  // since a hand/grab cursor there read as "this is a drag" when it isn't
+  // one anymore (see stepClipPlaneMove).
+  function updateMarkerHoverAffordance(clientX: number, clientY: number): void {
     if (movingClipPlaneId) {
       const def = clipPlanes.find((p) => p.id === movingClipPlaneId);
       if (def) showDragGuideLine(def.point, def.normal);
-      return true;
+      return;
     }
     if (placementModeActive) {
       dragGuideLine.visible = false;
-      return false;
+      return;
     }
     const marker = raycastClipMarker(clientX, clientY);
     const def = marker ? clipPlanes.find((p) => p.id === marker.userData.clipPlaneId) : undefined;
     if (def) {
       showDragGuideLine(def.point, def.normal);
-      return true;
+      return;
     }
     dragGuideLine.visible = false;
-    return false;
   }
 
   function showDragGuideLine(point: THREE.Vector3, normal: THREE.Vector3): void {
