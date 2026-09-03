@@ -502,11 +502,12 @@ function createDragGuideLine(): { object: THREE.LineSegments; layer: number } {
   return { object, layer };
 }
 
-// A soft-edged golden glow ring, drawn once to a canvas and used as a
-// sprite texture rather than built from geometry (THREE.TorusGeometry gave
-// a flat, matte, faceted-looking band) — a radial glow behind a bright
-// core ring reads as a polished "you're locked onto this point" indicator
-// instead of a plain donut. Same canvas-texture-sprite technique already
+// A thin teal crosshair (four short arms with a gap at the center, so the
+// exact point stays visible rather than being covered by a glyph), drawn
+// once to a canvas and used as a sprite texture — closer to a drafting-tool
+// reticle than the glowing ring this replaced, matching the crisp,
+// unadorned marks CAD software actually uses for a snapped point instead
+// of a decorative highlight. Same canvas-texture-sprite technique already
 // used for axis labels (see makeAxisLabelSprite), just with a drawn shape
 // instead of text.
 function createSnapHighlightTexture(): THREE.Texture {
@@ -516,25 +517,21 @@ function createSnapHighlightTexture(): THREE.Texture {
   canvas.height = size;
   const ctx = canvas.getContext('2d')!;
   const c = size / 2;
-  const ringRadius = size * 0.34;
+  const armLength = size * 0.34;
+  const gap = size * 0.1; // leaves the exact point itself unobscured
 
-  const glow = ctx.createRadialGradient(c, c, ringRadius * 0.35, c, c, ringRadius * 1.7);
-  glow.addColorStop(0, 'rgba(255, 210, 80, 0.85)');
-  glow.addColorStop(0.45, 'rgba(255, 180, 40, 0.35)');
-  glow.addColorStop(1, 'rgba(255, 180, 40, 0)');
-  ctx.fillStyle = glow;
-  ctx.fillRect(0, 0, size, size);
-
-  ctx.lineWidth = size * 0.06;
-  ctx.strokeStyle = '#fff2c2';
+  ctx.strokeStyle = '#14b8a6';
+  ctx.lineWidth = size * 0.045;
+  ctx.lineCap = 'round';
   ctx.beginPath();
-  ctx.arc(c, c, ringRadius, 0, Math.PI * 2);
-  ctx.stroke();
-
-  ctx.lineWidth = size * 0.022;
-  ctx.strokeStyle = '#ffb400';
-  ctx.beginPath();
-  ctx.arc(c, c, ringRadius, 0, Math.PI * 2);
+  ctx.moveTo(c - armLength, c);
+  ctx.lineTo(c - gap, c);
+  ctx.moveTo(c + gap, c);
+  ctx.lineTo(c + armLength, c);
+  ctx.moveTo(c, c - armLength);
+  ctx.lineTo(c, c - gap);
+  ctx.moveTo(c, c + gap);
+  ctx.lineTo(c, c + armLength);
   ctx.stroke();
 
   const texture = new THREE.CanvasTexture(canvas);
@@ -548,9 +545,9 @@ function createSnapHighlightTexture(): THREE.Texture {
 // longer needs to billboard it manually — only rescale it (see
 // MARKER_SCREEN_SCALE). Same always-on-top, own-layer treatment as
 // createDragGuideLine, and for the same reason.
-// 4.4x a unit marker's radius (the texture's glow already fades out well
-// before the sprite's own edge, so this reads as roughly the same ring
-// size the old 2.2x-radius torus did) — rescaled the same
+// 4.4x a unit marker's radius (the crosshair's arms reach about a third of
+// the way to the texture's own edge, so this reads as roughly the same
+// overall size the old 2.2x-radius ring did) — rescaled the same
 // distance * MARKER_SCREEN_SCALE way as the point markers in step(), so it
 // stays proportionate to a marker's own on-screen radius at any zoom.
 const SNAP_HIGHLIGHT_SCALE = 4.4;
