@@ -502,23 +502,67 @@ function createDragGuideLine(): { object: THREE.LineSegments; layer: number } {
   return { object, layer };
 }
 
-// Ring around whichever snap candidate a plane being repositioned is
-// currently locked onto (see findSnapPoint) — a gold torus rather than
-// another sphere, so it reads as "this point is highlighted" instead of
-// being mistaken for a second plane marker. Same always-on-top, own-layer
-// treatment as createDragGuideLine, and for the same reason.
-const SNAP_HIGHLIGHT_COLOR = 0xffcc00;
-function createSnapHighlight(): { object: THREE.Mesh; layer: number } {
+// A soft-edged golden glow ring, drawn once to a canvas and used as a
+// sprite texture rather than built from geometry (THREE.TorusGeometry gave
+// a flat, matte, faceted-looking band) — a radial glow behind a bright
+// core ring reads as a polished "you're locked onto this point" indicator
+// instead of a plain donut. Same canvas-texture-sprite technique already
+// used for axis labels (see makeAxisLabelSprite), just with a drawn shape
+// instead of text.
+function createSnapHighlightTexture(): THREE.Texture {
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  const c = size / 2;
+  const ringRadius = size * 0.34;
+
+  const glow = ctx.createRadialGradient(c, c, ringRadius * 0.35, c, c, ringRadius * 1.7);
+  glow.addColorStop(0, 'rgba(255, 210, 80, 0.85)');
+  glow.addColorStop(0.45, 'rgba(255, 180, 40, 0.35)');
+  glow.addColorStop(1, 'rgba(255, 180, 40, 0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, size, size);
+
+  ctx.lineWidth = size * 0.06;
+  ctx.strokeStyle = '#fff2c2';
+  ctx.beginPath();
+  ctx.arc(c, c, ringRadius, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.lineWidth = size * 0.022;
+  ctx.strokeStyle = '#ffb400';
+  ctx.beginPath();
+  ctx.arc(c, c, ringRadius, 0, Math.PI * 2);
+  ctx.stroke();
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
+// Highlights whichever snap candidate a plane being repositioned is
+// currently locked onto (see findSnapPoint). A Sprite always faces the
+// camera on its own, unlike the torus mesh this replaced, so step() no
+// longer needs to billboard it manually — only rescale it (see
+// MARKER_SCREEN_SCALE) and give it its gentle pulse. Same always-on-top,
+// own-layer treatment as createDragGuideLine, and for the same reason.
+// 4.4x a unit marker's radius (the texture's glow already fades out well
+// before the sprite's own edge, so this reads as roughly the same ring
+// size the old 2.2x-radius torus did) — rescaled the same
+// distance * MARKER_SCREEN_SCALE way as the point markers in step() (see
+// the pulse constants below for the extra breathing factor on top), so it
+// stays proportionate to a marker's own on-screen radius at any zoom.
+const SNAP_HIGHLIGHT_SCALE = 4.4;
+// A slow, subtle "breathing" pulse (±10% size, one full cycle roughly every
+// 1.6s) rather than a static ring — see step()'s snapHighlight block.
+const SNAP_HIGHLIGHT_PULSE_AMOUNT = 0.1;
+const SNAP_HIGHLIGHT_PULSE_SPEED = (2 * Math.PI) / 1600;
+function createSnapHighlight(): { object: THREE.Sprite; layer: number } {
   const layer = nextClipHighlightLayer++;
-  // Built at 2.2x/0.4x a unit marker's proportions (rather than baking
-  // CLIP_POINT_MARKER_RADIUS in directly), since step() rescales it by the
-  // same distance * MARKER_SCREEN_SCALE factor as the point markers — so it
-  // stays a constant 2.2x a marker's own on-screen radius at any zoom,
-  // instead of the ring shrinking away while the marker it surrounds stays
-  // a constant screen size.
-  const object = new THREE.Mesh(
-    new THREE.TorusGeometry(2.2, 0.4, 8, 20),
-    new THREE.MeshBasicMaterial({ color: SNAP_HIGHLIGHT_COLOR, transparent: true, depthTest: false }),
+  const object = new THREE.Sprite(
+    new THREE.SpriteMaterial({ map: createSnapHighlightTexture(), transparent: true, depthTest: false }),
   );
   object.renderOrder = 1000;
   object.visible = false;
@@ -1729,13 +1773,16 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     if (placementHoverMarker.visible) {
       placementHoverMarker.scale.setScalar(camera.position.distanceTo(placementHoverMarker.position) * MARKER_SCREEN_SCALE);
     }
-    // Billboarded (a torus otherwise only reads as a ring face-on) and
-    // constant-size, like the point markers above — recomputed every frame
-    // rather than only on pointermove, so it doesn't lag behind if the
-    // camera moves (zoom, orbit) without the mouse also moving.
+    // Constant-size like the point markers above (a Sprite already always
+    // faces the camera on its own, unlike the torus mesh this replaced) —
+    // recomputed every frame rather than only on pointermove, so it doesn't
+    // lag behind if the camera moves (zoom, orbit) without the mouse also
+    // moving. The gentle breathing pulse on top is purely decorative, to
+    // read as "actively locked on" rather than a static decal.
     if (snapHighlight.visible) {
-      snapHighlight.quaternion.copy(camera.quaternion);
-      snapHighlight.scale.setScalar(camera.position.distanceTo(snapHighlight.position) * MARKER_SCREEN_SCALE);
+      const pulse = 1 + SNAP_HIGHLIGHT_PULSE_AMOUNT * Math.sin(performance.now() * SNAP_HIGHLIGHT_PULSE_SPEED);
+      const scale = camera.position.distanceTo(snapHighlight.position) * MARKER_SCREEN_SCALE * SNAP_HIGHLIGHT_SCALE * pulse;
+      snapHighlight.scale.setScalar(scale);
     }
 
     const now = performance.now();
@@ -1821,8 +1868,8 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     dragGuideLine.geometry.dispose();
     (dragGuideLine.material as THREE.Material).dispose();
     scene.remove(snapHighlight);
-    snapHighlight.geometry.dispose();
-    (snapHighlight.material as THREE.Material).dispose();
+    snapHighlight.material.map?.dispose();
+    snapHighlight.material.dispose();
     scene.remove(hiddenEdgesOverlay);
     hiddenEdgesOverlay.geometry.dispose();
     (hiddenEdgesOverlay.material as THREE.Material).dispose();
