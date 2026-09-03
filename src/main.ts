@@ -69,7 +69,7 @@ function refreshClipPlaneDef(def: ClipPlaneDef) {
 // the model" toggle, managed from its own header dialog (see the snap-*
 // consts and openSnapDialog/closeSnapDialog below) — off by default, and
 // currently only consulted while dragging a cutting plane's marker (see
-// createPane's stepClipPlaneDrag/findSnapPoint), though the toggle itself
+// createPane's stepClipPlaneMove/findSnapPoint), though the toggle itself
 // isn't specific to that interaction and is meant to be reused by other
 // drag interactions later.
 let snapToVertices = false;
@@ -203,21 +203,32 @@ function createCutEdgeHighlight(): { object: THREE.LineSegments; layer: number }
 // click would land (see createPane's placementHoverMarker). depthTest is
 // off, so it always draws on top rather than being hidden behind nearer
 // geometry the way the surface itself would be — needed because rotating
-// the view to reach a good dragging angle (see stepClipPlaneDrag) can
-// easily put the marker on the far side of the model from the new camera
-// position, and it has to stay visible/grabbable there rather than
+// the view to reach a good angle to reposition it (see stepClipPlaneMove)
+// can easily put the marker on the far side of the model from the new
+// camera position, and it has to stay visible/clickable there rather than
 // disappear behind the very geometry its plane is cutting. It also sits at
 // the exact plane point, so — unlike the boundary highlight, which is
 // nudged just enough to survive the clip test on the kept side — the
 // active clipping plane would slice it clean in half; every pane renders
 // MARKER_LAYER in a second, unclipped pass instead (see step()) so markers
 // always show whole regardless of which plane is currently cutting.
+//
+// Built as a unit sphere (radius 1) rather than at its true display size:
+// every pane's step() rescales it every frame to CLIP_POINT_MARKER_RADIUS
+// times its distance from that pane's own camera, so it reads as the same
+// screen size whether the model fills the view or is zoomed far out,
+// instead of shrinking to an unusable speck or ballooning as the camera
+// moves — the same technique already used for pivotIndicator.
 const MARKER_LAYER = 10;
 const CLIP_POINT_MARKER_COLOR = 0xff3b30;
 const CLIP_POINT_MARKER_RADIUS = 0.035;
+// Chosen so a marker's apparent size at the default camera's initial
+// distance from the origin (position (4,3,5), i.e. sqrt(50)) matches
+// CLIP_POINT_MARKER_RADIUS exactly, keeping the default view unchanged.
+const MARKER_SCREEN_SCALE = CLIP_POINT_MARKER_RADIUS / Math.sqrt(50);
 function makePointMarker(): THREE.Mesh {
   const mesh = new THREE.Mesh(
-    new THREE.SphereGeometry(CLIP_POINT_MARKER_RADIUS, 12, 12),
+    new THREE.SphereGeometry(1, 12, 12),
     new THREE.MeshBasicMaterial({ color: CLIP_POINT_MARKER_COLOR, transparent: true, depthTest: false }),
   );
   mesh.renderOrder = 1000;
@@ -450,8 +461,8 @@ function createFaceHoverHighlight(): { object: THREE.Mesh; layer: number } {
 }
 
 // Short line through a plane's point along its normal, shown while hovering
-// or dragging that plane's marker (see createPane's dragGuideLine) as the
-// "slider track" affordance for offsetting the plane's depth. depthTest off
+// or repositioning that plane's marker (see createPane's dragGuideLine) as
+// the "slider track" affordance for offsetting the plane's depth. depthTest off
 // and a high renderOrder, like the world-axes gizmo's axisRod, since it's a
 // transient UI overlay rather than scene content.
 const DRAG_GUIDE_HALF_LENGTH = 0.5;
@@ -460,6 +471,31 @@ function createDragGuideLine(): { object: THREE.LineSegments; layer: number } {
   const object = new THREE.LineSegments(
     new THREE.BufferGeometry(),
     new THREE.LineBasicMaterial({ color: CLIP_POINT_MARKER_COLOR, transparent: true, opacity: 0.9, depthTest: false }),
+  );
+  object.renderOrder = 1000;
+  object.visible = false;
+  object.layers.set(layer);
+  scene.add(object);
+  return { object, layer };
+}
+
+// Ring around whichever snap candidate a plane being repositioned is
+// currently locked onto (see findSnapPoint) — a gold torus rather than
+// another sphere, so it reads as "this point is highlighted" instead of
+// being mistaken for a second plane marker. Same always-on-top, own-layer
+// treatment as createDragGuideLine, and for the same reason.
+const SNAP_HIGHLIGHT_COLOR = 0xffcc00;
+function createSnapHighlight(): { object: THREE.Mesh; layer: number } {
+  const layer = nextClipHighlightLayer++;
+  // Built at 2.2x/0.4x a unit marker's proportions (rather than baking
+  // CLIP_POINT_MARKER_RADIUS in directly), since step() rescales it by the
+  // same distance * MARKER_SCREEN_SCALE factor as the point markers — so it
+  // stays a constant 2.2x a marker's own on-screen radius at any zoom,
+  // instead of the ring shrinking away while the marker it surrounds stays
+  // a constant screen size.
+  const object = new THREE.Mesh(
+    new THREE.TorusGeometry(2.2, 0.4, 8, 20),
+    new THREE.MeshBasicMaterial({ color: SNAP_HIGHLIGHT_COLOR, transparent: true, depthTest: false }),
   );
   object.renderOrder = 1000;
   object.visible = false;
@@ -772,25 +808,35 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   const { object: faceHoverHighlight, layer: faceHoverHighlightLayer } = createFaceHoverHighlight();
   camera.layers.enable(faceHoverHighlightLayer);
 
-  // "Slider track" shown while hovering or dragging a placed plane's marker
-  // (see raycastClipMarker / stepClipPlaneDrag below) to offset its depth
-  // along its own normal. Its layer is deliberately NOT enabled on the
-  // camera here — like a marker, it sits exactly on whatever plane it
-  // belongs to, so the active clipping plane would slice it in two; step()
-  // only ever includes this layer in its second, always-unclipped render
-  // pass (see MARKER_LAYER there), never the main one.
+  // "Slider track" shown while hovering a placed plane's marker or actively
+  // repositioning it (see raycastClipMarker / stepClipPlaneMove below) to
+  // offset its depth along its own normal. Its layer is deliberately NOT
+  // enabled on the camera here — like a marker, it sits exactly on whatever
+  // plane it belongs to, so the active clipping plane would slice it in
+  // two; step() only ever includes this layer in its second, always-
+  // unclipped render pass (see MARKER_LAYER there), never the main one.
   const { object: dragGuideLine, layer: dragGuideLineLayer } = createDragGuideLine();
 
-  // Non-null while the user is dragging a placed plane's marker to offset it
-  // along its own normal (see raycastClipMarker/stepClipPlaneDrag). The drag
-  // line/direction are fixed at drag-start — closestPointOnLineToRay only
-  // needs any one point on the line, not the current one, to keep tracking
-  // the mouse along it.
-  let draggingClipPlaneId: string | null = null;
+  // Highlights whichever snap candidate (vertex/midpoint) a plane currently
+  // being repositioned is locked onto, if any — see findSnapPoint and
+  // stepClipPlaneMove. Same "own layer, second pass only" treatment as
+  // dragGuideLine, for the same reason (it sits on the model's own surface).
+  const { object: snapHighlight, layer: snapHighlightLayer } = createSnapHighlight();
+
+  // Non-null while a plane's marker is being repositioned: click once on a
+  // marker to arm it (every pointermove from then on live-previews the
+  // plane sliding along its own normal — see stepClipPlaneMove), click again
+  // anywhere to commit that position, or press Escape to cancel back to
+  // clipPlaneMoveOriginalPoint. Deliberately not a press-and-hold drag —
+  // the line/direction are fixed at arm-time, and closestPointOnLineToRay
+  // only needs any one point on the line, not the current one, to keep
+  // tracking the mouse along it.
+  let movingClipPlaneId: string | null = null;
   const dragLineAnchor = new THREE.Vector3();
   const dragLineDir = new THREE.Vector3();
-  // Populated at drag-start, cleared at drag-end — see the pointerdown/up
-  // handlers below and findSnapPoint.
+  const clipPlaneMoveOriginalPoint = new THREE.Vector3();
+  // Populated when a move is armed, cleared when it ends — see the
+  // pointerup handler below and findSnapPoint.
   let snapCandidateCache: { vertices: THREE.Vector3[]; midpoints: THREE.Vector3[] } | null = null;
 
   function applyClipSelection() {
@@ -1291,22 +1337,6 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     } else if (event.button === 1) {
       isPanning = true;
       setCursor('pan');
-    } else if (event.button === 0 && !placementModeActive) {
-      // Grabbing a placed plane's marker starts a drag along its normal
-      // (see stepClipPlaneDrag) instead of the ordinary nav-cube click.
-      const marker = raycastClipMarker(event.clientX, event.clientY);
-      const def = marker ? clipPlanes.find((p) => p.id === marker.userData.clipPlaneId) : undefined;
-      if (def) {
-        event.preventDefault();
-        renderer.domElement.setPointerCapture(event.pointerId);
-        draggingClipPlaneId = def.id;
-        dragLineAnchor.copy(def.point);
-        dragLineDir.copy(def.normal);
-        // Computed once per drag rather than every pointermove — content
-        // doesn't change mid-drag, so there's nothing to gain from redoing
-        // this per frame (see findSnapPoint).
-        snapCandidateCache = collectSnapCandidates(content);
-      }
     }
   });
   renderer.domElement.addEventListener('pointermove', (event) => {
@@ -1314,11 +1344,11 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     stepOrbit(event.clientX, event.clientY);
     navCubeHovering = pointerOverNavCubeRegion(event.clientX, event.clientY);
     updatePlacementHoverMarker(event.clientX, event.clientY);
-    stepClipPlaneDrag(event.clientX, event.clientY);
+    stepClipPlaneMove(event.clientX, event.clientY);
     const markerHover = updateMarkerHoverAffordance(event.clientX, event.clientY);
     if (!orbit.active && !isPanning) {
-      renderer.domElement.style.cursor = draggingClipPlaneId
-        ? 'grabbing'
+      renderer.domElement.style.cursor = movingClipPlaneId
+        ? ''
         : markerHover
           ? 'grab'
           : navCubeHovering && navCubeShowingFull()
@@ -1330,7 +1360,7 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     navCubeHovering = false;
     placementHoverMarker.visible = false;
     faceHoverHighlight.visible = false;
-    if (!draggingClipPlaneId) dragGuideLine.visible = false;
+    if (!movingClipPlaneId) dragGuideLine.visible = false;
   });
   renderer.domElement.addEventListener('pointerup', (event) => {
     if (event.pointerType !== 'mouse') return;
@@ -1349,13 +1379,32 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
         lastMiddleClick = { time: now, x: event.clientX, y: event.clientY };
       }
     } else if (event.button === 0) {
-      if (draggingClipPlaneId) {
-        draggingClipPlaneId = null;
+      if (movingClipPlaneId) {
+        // Second click: commit whatever position stepClipPlaneMove already
+        // applied live on the last pointermove, and stop repositioning.
+        movingClipPlaneId = null;
         snapCandidateCache = null;
+        snapHighlight.visible = false;
         return;
       }
       if (placementModeActive) {
         placeClipPlaneAt(event.clientX, event.clientY);
+        return;
+      }
+      // Clicking a placed plane's marker arms repositioning instead of the
+      // ordinary nav-cube click — see stepClipPlaneMove and the
+      // movingClipPlaneId branch above for the second click that commits it.
+      const marker = raycastClipMarker(event.clientX, event.clientY);
+      const def = marker ? clipPlanes.find((p) => p.id === marker.userData.clipPlaneId) : undefined;
+      if (def) {
+        movingClipPlaneId = def.id;
+        dragLineAnchor.copy(def.point);
+        dragLineDir.copy(def.normal);
+        clipPlaneMoveOriginalPoint.copy(def.point);
+        // Computed once per move rather than every pointermove — content
+        // doesn't change mid-move, so there's nothing to gain from redoing
+        // this per frame (see findSnapPoint).
+        snapCandidateCache = collectSnapCandidates(content);
         return;
       }
       const dir = hitTestNavCube(event.clientX, event.clientY);
@@ -1433,7 +1482,7 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
 
   // Raycasts against the placed-plane markers (only meaningful while the
   // cutting-planes dialog is open, so its group is visible) to find which
-  // plane, if any, the cursor is over — see stepClipPlaneDrag and
+  // plane, if any, the cursor is over — see stepClipPlaneMove and
   // updateMarkerHoverAffordance. The shared raycaster defaults to layer 0
   // only, so MARKER_LAYER (where every marker lives) needs enabling just for
   // this one query, then restoring, the same way step()'s unclipped marker
@@ -1450,12 +1499,6 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     return hit ? (hit.object as THREE.Mesh) : null;
   }
 
-  // Moves the currently-dragged plane's point along its own normal to track
-  // the mouse as closely as that one-dimensional constraint allows — this is
-  // the "depth slider": the plane's orientation never changes, only how far
-  // along it sits, so this is exactly the offset that was otherwise missing
-  // for pushing a face-flush plane (see planeCoincidesWithAFace) into the
-  // model to get an actual cut.
   // Projects a world point to this pane's own screen (client) coordinates —
   // the inverse of the NDC conversion used everywhere else in this file —
   // so findSnapPoint can compare a candidate's on-screen position to the
@@ -1488,11 +1531,19 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     return best;
   }
 
-  function stepClipPlaneDrag(clientX: number, clientY: number) {
-    if (!draggingClipPlaneId) return;
-    const def = clipPlanes.find((p) => p.id === draggingClipPlaneId);
+  // Moves the armed plane's point along its own normal to track the mouse
+  // as closely as that one-dimensional constraint allows, every pointermove
+  // while movingClipPlaneId is set (armed by one click on its marker,
+  // committed by the next — see the pointerup handler below) — this is the
+  // "depth slider": the plane's orientation never changes, only how far
+  // along it sits, so this is exactly the offset that was otherwise missing
+  // for pushing a face-flush plane (see planeCoincidesWithAFace) into the
+  // model to get an actual cut.
+  function stepClipPlaneMove(clientX: number, clientY: number) {
+    if (!movingClipPlaneId) return;
+    const def = clipPlanes.find((p) => p.id === movingClipPlaneId);
     if (!def) {
-      draggingClipPlaneId = null;
+      movingClipPlaneId = null;
       return;
     }
     const snapTarget = findSnapPoint(clientX, clientY);
@@ -1502,15 +1553,18 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
       // vertex/midpoint — rather than through the ray-based mapping below,
       // which snapping bypasses entirely.
       def.point.copy(dragLineAnchor).addScaledVector(dragLineDir, dragLineDir.dot(snapTarget.clone().sub(dragLineAnchor)));
+      snapHighlight.position.copy(snapTarget);
+      snapHighlight.visible = true;
     } else {
       const rect = renderer.domElement.getBoundingClientRect();
       const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
       raycaster.setFromCamera(ndc, camera);
       const closest = closestPointOnLineToRay(dragLineAnchor, dragLineDir, raycaster.ray.origin, raycaster.ray.direction);
       // Mirrored through the drag-start point: the raw closest-point mapping
-      // ran backwards from what felt natural while dragging, so every
+      // ran backwards from what felt natural while positioning, so every
       // frame's result is reflected through the anchor to reverse it.
       def.point.copy(dragLineAnchor).multiplyScalar(2).sub(closest);
+      snapHighlight.visible = false;
     }
     refreshClipPlaneDef(def);
     reapplyClipPlaneEverywhere();
@@ -1518,12 +1572,13 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
   }
 
   // Shows the drag guide line on whichever plane's marker is hovered or
-  // being dragged, and reports whether the cursor should read as
-  // draggable — the caller folds that into its single cursor decision so
-  // this doesn't fight with the nav-cube-hover cursor logic below.
+  // currently being repositioned, and reports whether the cursor should
+  // read as clickable — the caller folds that into its single cursor
+  // decision so this doesn't fight with the nav-cube-hover cursor logic
+  // below.
   function updateMarkerHoverAffordance(clientX: number, clientY: number): boolean {
-    if (draggingClipPlaneId) {
-      const def = clipPlanes.find((p) => p.id === draggingClipPlaneId);
+    if (movingClipPlaneId) {
+      const def = clipPlanes.find((p) => p.id === movingClipPlaneId);
       if (def) showDragGuideLine(def.point, def.normal);
       return true;
     }
@@ -1595,6 +1650,26 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
       pivotIndicator.scale.setScalar(scale);
     }
 
+    // Keeps every point marker (shared across panes, see clipPointMarkersGroup)
+    // a constant apparent size from THIS pane's camera specifically — see
+    // makePointMarker for why. Markers are shared state, so this only holds
+    // until the next pane's step() re-scales them from its own camera; since
+    // panes render one at a time, that's exactly when it needs to be correct.
+    clipPointMarkersGroup.children.forEach((marker) => {
+      marker.scale.setScalar(camera.position.distanceTo(marker.position) * MARKER_SCREEN_SCALE);
+    });
+    if (placementHoverMarker.visible) {
+      placementHoverMarker.scale.setScalar(camera.position.distanceTo(placementHoverMarker.position) * MARKER_SCREEN_SCALE);
+    }
+    // Billboarded (a torus otherwise only reads as a ring face-on) and
+    // constant-size, like the point markers above — recomputed every frame
+    // rather than only on pointermove, so it doesn't lag behind if the
+    // camera moves (zoom, orbit) without the mouse also moving.
+    if (snapHighlight.visible) {
+      snapHighlight.quaternion.copy(camera.quaternion);
+      snapHighlight.scale.setScalar(camera.position.distanceTo(snapHighlight.position) * MARKER_SCREEN_SCALE);
+    }
+
     const now = performance.now();
     const dt = (now - lastStepTime) / 1000;
     lastStepTime = now;
@@ -1650,6 +1725,7 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     const backgroundBefore = scene.background;
     camera.layers.set(MARKER_LAYER);
     camera.layers.enable(dragGuideLineLayer);
+    camera.layers.enable(snapHighlightLayer);
     scene.background = null;
     renderer.render(scene, camera);
     scene.background = backgroundBefore;
@@ -1675,6 +1751,9 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     scene.remove(dragGuideLine);
     dragGuideLine.geometry.dispose();
     (dragGuideLine.material as THREE.Material).dispose();
+    scene.remove(snapHighlight);
+    snapHighlight.geometry.dispose();
+    (snapHighlight.material as THREE.Material).dispose();
     navMaterials.forEach((material) => {
       material.map?.dispose();
       material.dispose();
@@ -1724,6 +1803,23 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     hidePlacementHoverMarker: () => {
       placementHoverMarker.visible = false;
       faceHoverHighlight.visible = false;
+    },
+    // Escape while repositioning a plane's marker (see the module-level
+    // keydown handler) reverts it to where it was before the arming click,
+    // rather than leaving it wherever the cursor last happened to be.
+    cancelClipPlaneMove: () => {
+      if (!movingClipPlaneId) return;
+      const def = clipPlanes.find((p) => p.id === movingClipPlaneId);
+      if (def) {
+        def.point.copy(clipPlaneMoveOriginalPoint);
+        refreshClipPlaneDef(def);
+        reapplyClipPlaneEverywhere();
+        refreshClipPointMarkers();
+      }
+      movingClipPlaneId = null;
+      snapCandidateCache = null;
+      snapHighlight.visible = false;
+      dragGuideLine.visible = false;
     },
   };
 }
@@ -2007,10 +2103,12 @@ clipPlaneCancelBtn.addEventListener('click', () => {
 });
 
 window.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && placementModeActive) {
+  if (event.key !== 'Escape') return;
+  if (placementModeActive) {
     exitPlacementMode();
     openClipPlaneDialog();
   }
+  panes.forEach((pane) => pane.cancelClipPlaneMove());
 });
 
 clipPlaneList.addEventListener('change', (event) => {
