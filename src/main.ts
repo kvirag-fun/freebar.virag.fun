@@ -1082,6 +1082,16 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     const sphere = box3.getBoundingSphere(new THREE.Sphere());
     const radius = Math.max(sphere.radius, 0.001);
 
+    // controls.maxDistance/camera.far are set once at pane creation, sized
+    // for the placeholder box — an uploaded model much larger than that (a
+    // real bar/rebar assembly can easily be many meters across) needs both
+    // to grow, or OrbitControls clamps the camera closer than the distance
+    // just computed below and the far plane clips the model's far side,
+    // together making the fit-to-view result look completely broken.
+    controls.maxDistance = Math.max(50, radius * 20);
+    camera.far = Math.max(1000, radius * 20);
+    camera.updateProjectionMatrix();
+
     const vFov = THREE.MathUtils.degToRad(camera.fov);
     const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
     const distance = (radius / Math.sin(Math.min(vFov, hFov) / 2)) * FIT_PADDING;
