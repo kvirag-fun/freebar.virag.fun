@@ -31,6 +31,13 @@ const snapCloseBtn = document.querySelector<HTMLButtonElement>('#snap-close-btn'
 const snapVertexCheckbox = document.querySelector<HTMLInputElement>('#snap-vertex-checkbox')!;
 const snapMidpointCheckbox = document.querySelector<HTMLInputElement>('#snap-midpoint-checkbox')!;
 
+const settingsBtn = document.querySelector<HTMLButtonElement>('#settings-btn')!;
+const settingsDialog = document.querySelector<HTMLElement>('#settings-dialog')!;
+const settingsDialogPanel = document.querySelector<HTMLElement>('#settings-dialog .modal-panel')!;
+const settingsDialogHeader = document.querySelector<HTMLElement>('#settings-dialog .modal-header')!;
+const settingsCloseBtn = document.querySelector<HTMLButtonElement>('#settings-close-btn')!;
+const bgSwatchButtons = document.querySelectorAll<HTMLButtonElement>('#settings-dialog .bg-swatch');
+
 // Shared across every pane, so one button hides/shows the cube/axes everywhere at once.
 // The nav cube cycles full -> mini -> off -> full: "mini" renders small and
 // schematic, expanding to full size/detail on hover (see createPane).
@@ -92,6 +99,14 @@ function closeSnapDialog() {
   snapDialog.hidden = true;
 }
 
+function openSettingsDialog() {
+  settingsDialog.hidden = false;
+}
+
+function closeSettingsDialog() {
+  settingsDialog.hidden = true;
+}
+
 // Every vertex and edge midpoint of content's actual (real, non-generated)
 // edges, in world space — the candidate set findSnapPoint chooses from.
 // Built from each mesh's own EdgesGeometry (the same notion of "edge" as
@@ -129,6 +144,18 @@ function collectSnapCandidates(root: THREE.Object3D): {
 }
 
 const scene = new THREE.Scene();
+
+// Background is one of two fixed themes (see applyBackgroundMode) rather
+// than an arbitrary color, specifically so "edges" can stay simply "whichever
+// of black/white contrasts with it" per the Settings dialog's Background
+// section, instead of needing a real contrast computation against any color.
+let backgroundMode: 'light' | 'dark' = 'dark';
+// The color every real-edge outline (boxEdges below, and an uploaded STL's
+// own edges, see loadSTLIntoScene) is drawn in — tracked here so newly built
+// edges pick up whichever theme is currently active rather than always
+// defaulting to white.
+let edgeColor = 0xffffff;
+
 scene.background = new THREE.Color(0x1a1a1a);
 
 // Build-time stamp so a redeploy can be confirmed by eye: this should change
@@ -145,8 +172,11 @@ const keyLight = new THREE.DirectionalLight(0xffffff, 1.2);
 keyLight.position.set(5, 8, 6);
 scene.add(keyLight);
 
-// Ground grid for spatial reference
-const grid = new THREE.GridHelper(10, 10, 0x444444, 0x2a2a2a);
+// Ground grid for spatial reference. Reassigned (not just recolored) by
+// applyBackgroundMode, since GridHelper bakes its two colors into per-vertex
+// color attributes at construction time rather than exposing them as
+// updatable material properties.
+let grid = new THREE.GridHelper(10, 10, 0x444444, 0x2a2a2a);
 scene.add(grid);
 
 // World axes helper, colored per this project's direction convention (see
@@ -174,15 +204,56 @@ const box = new THREE.Mesh(
 box.position.y = 1; // sit on top of the grid
 content.add(box);
 
-// Thin white outline along the box's real (modeled) edges, so they read as
-// distinct from a cut's generated edge (see cutEdgeHighlight below), which
-// is dashed instead. Parented to the box so it inherits its transform and
-// gets cut by the same clipping plane during the main scene render.
+// Outline along the box's real (modeled) edges, so they read as distinct
+// from a cut's generated edge (see cutEdgeHighlight below), which is dashed
+// instead. Parented to the box so it inherits its transform and gets cut by
+// the same clipping plane during the main scene render. Its color tracks
+// edgeColor (see applyBackgroundMode) rather than a fixed white so it stays
+// legible against either background theme.
 const boxEdges = new THREE.LineSegments(
   new THREE.EdgesGeometry(box.geometry),
-  new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 }),
+  new THREE.LineBasicMaterial({ color: edgeColor, transparent: true, opacity: 0.8 }),
 );
 box.add(boxEdges);
+
+// Applies the currently selected Background theme (see the Settings dialog)
+// to every themed element: the scene background itself, the grid (rebuilt —
+// see `grid`'s declaration for why), every real-edge outline currently in
+// `content` (updated in place, cheaper than rebuilding and correct for both
+// the placeholder box and an uploaded STL's edges), each pane's cut-edge
+// highlight/hidden-edges overlay/face-hover highlight (all white-on-dark by
+// default, so would otherwise vanish against a white background), and the
+// build-stamp text. Also applied to `edgeColor` itself so a *later* upload
+// picks up the current theme instead of always defaulting to white.
+function applyBackgroundMode() {
+  const light = backgroundMode === 'light';
+  edgeColor = light ? 0x000000 : 0xffffff;
+
+  scene.background = new THREE.Color(light ? 0xffffff : 0x1a1a1a);
+
+  scene.remove(grid);
+  grid.geometry.dispose();
+  (grid.material as THREE.Material).dispose();
+  grid = new THREE.GridHelper(10, 10, light ? 0xaaaaaa : 0x444444, light ? 0xdadada : 0x2a2a2a);
+  scene.add(grid);
+
+  content.traverse((node) => {
+    if (node instanceof THREE.LineSegments) (node.material as THREE.LineBasicMaterial).color.set(edgeColor);
+  });
+
+  buildStamp.style.color = light ? 'rgba(0, 0, 0, 0.5)' : 'rgba(255, 255, 255, 0.5)';
+
+  panes.forEach((pane) => pane.applyBackgroundMode(light));
+
+  bgSwatchButtons.forEach((btn) => btn.classList.toggle('active', btn.dataset.bg === backgroundMode));
+}
+
+bgSwatchButtons.forEach((btn) => {
+  btn.addEventListener('click', () => {
+    backgroundMode = btn.dataset.bg === 'light' ? 'light' : 'dark';
+    applyBackgroundMode();
+  });
+});
 
 // Uploading an STL replaces whatever's currently in `content` (initially
 // just the placeholder box, later a previously uploaded model) with a mesh
@@ -224,7 +295,7 @@ function loadSTLIntoScene(geometry: THREE.BufferGeometry) {
 
   const edges = new THREE.LineSegments(
     new THREE.EdgesGeometry(geometry),
-    new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 }),
+    new THREE.LineBasicMaterial({ color: edgeColor, transparent: true, opacity: 0.8 }),
   );
   mesh.add(edges);
 
@@ -1985,6 +2056,14 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     refreshClipSelectorOptions,
     applyClipSelection,
     zoomToFit,
+    // Recolors this pane's own white-on-dark overlays (see applyBackgroundMode)
+    // to stay visible against whichever background theme is now active.
+    applyBackgroundMode: (light: boolean) => {
+      const color = light ? 0x000000 : 0xffffff;
+      (cutEdgeHighlight.material as THREE.LineDashedMaterial).color.set(color);
+      (faceHoverHighlight.material as THREE.MeshBasicMaterial).color.set(color);
+      (hiddenEdgesOverlay.material as THREE.LineBasicMaterial).color.set(color);
+    },
     hidePlacementHoverMarker: () => {
       placementHoverMarker.visible = false;
       faceHoverHighlight.visible = false;
@@ -2215,6 +2294,7 @@ function exitPlacementMode() {
 
 clipPlaneBtn.addEventListener('click', () => {
   closeSnapDialog();
+  closeSettingsDialog();
   renderClipPlaneList();
   openClipPlaneDialog();
 });
@@ -2275,14 +2355,26 @@ function makeDialogDraggable(panel: HTMLElement, header: HTMLElement) {
 
 makeDialogDraggable(clipPlaneDialogPanel, clipPlaneDialogHeader);
 makeDialogDraggable(snapDialogPanel, snapDialogHeader);
+makeDialogDraggable(settingsDialogPanel, settingsDialogHeader);
 
 snapBtn.addEventListener('click', () => {
   closeClipPlaneDialog();
+  closeSettingsDialog();
   openSnapDialog();
 });
 
 snapCloseBtn.addEventListener('click', () => {
   closeSnapDialog();
+});
+
+settingsBtn.addEventListener('click', () => {
+  closeClipPlaneDialog();
+  closeSnapDialog();
+  openSettingsDialog();
+});
+
+settingsCloseBtn.addEventListener('click', () => {
+  closeSettingsDialog();
 });
 
 snapVertexCheckbox.addEventListener('change', () => {

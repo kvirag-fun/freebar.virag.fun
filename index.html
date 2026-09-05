@@ -33,6 +33,13 @@
           </svg>
           <span class="tooltip">Point snapping</span>
         </button>
+        <button id="settings-btn" class="icon-btn" type="button" aria-label="Settings" title="Settings">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" />
+          </svg>
+          <span class="tooltip">Settings</span>
+        </button>
       </header>
       <main id="viewport">
         <div id="panes"></div>
@@ -101,6 +108,30 @@
           <input type="checkbox" id="snap-midpoint-checkbox" checked />
           Snap to edge midpoints
         </label>
+      </div>
+    </div>
+    <div id="settings-dialog" class="modal-overlay modal-overlay-blocking" hidden>
+      <div class="modal-panel">
+        <div class="modal-header">
+          <h2>Settings</h2>
+          <button id="settings-close-btn" class="icon-btn" type="button" aria-label="Close" title="Close">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="5" y1="5" x2="19" y2="19" />
+              <line x1="19" y1="5" x2="5" y2="19" />
+            </svg>
+          </button>
+        </div>
+        <p class="settings-section-label">Background</p>
+        <div class="bg-swatch-group">
+          <button class="bg-swatch" type="button" data-bg="light">
+            <span class="bg-swatch-preview bg-swatch-preview-light"></span>
+            White
+          </button>
+          <button class="bg-swatch active" type="button" data-bg="dark">
+            <span class="bg-swatch-preview bg-swatch-preview-dark"></span>
+            Black
+          </button>
+        </div>
       </div>
     </div>
     <script type="module" src="/src/main.ts"></script>
