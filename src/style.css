@@ -198,6 +198,23 @@ html, body {
   display: none;
 }
 
+/* Unlike the cutting-planes dialog, which stays non-blocking so the viewport
+   behind it can still be clicked/dragged while placing a plane, the point
+   snapping dialog is a true modal: a darker scrim and real click-blocking so
+   nothing behind it is reachable while it's open. Scoped to the viewport
+   strip between the header and footer (rather than the full inset:0 the
+   plain .modal-overlay uses) so it blocks the 3D view without also
+   swallowing clicks on the header/footer's own buttons - including the
+   other dialog's toggle button, needed for switching between the two. */
+.modal-overlay-blocking {
+  top: var(--bar-height);
+  right: 0;
+  bottom: var(--bar-height);
+  left: 0;
+  background: rgba(0, 0, 0, 0.5);
+  pointer-events: auto;
+}
+
 .modal-panel {
   width: min(480px, calc(100vw - 32px));
   max-height: calc(100vh - 64px);

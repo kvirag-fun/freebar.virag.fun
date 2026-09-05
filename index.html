@@ -9,6 +9,15 @@
   <body>
     <div id="app">
       <header id="app-header">
+        <button id="upload-model-btn" class="icon-btn" type="button" aria-label="Upload STL model" title="Upload STL model">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 16 L12 4" />
+            <path d="M7 9 L12 4 L17 9" />
+            <path d="M4 16 L4 19 A1 1 0 0 0 5 20 L19 20 A1 1 0 0 0 20 19 L20 16" />
+          </svg>
+          <span class="tooltip">Upload STL model</span>
+        </button>
+        <input id="upload-model-input" type="file" accept=".stl" hidden />
         <button id="clip-plane-btn" class="icon-btn" type="button" aria-label="Cutting planes" title="Cutting planes">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <rect x="4" y="4" width="16" height="16" rx="1" />
@@ -73,7 +82,7 @@
         <button id="clip-plane-add-btn" class="clip-plane-add-btn" type="button">+ Add plane</button>
       </div>
     </div>
-    <div id="snap-dialog" class="modal-overlay" hidden>
+    <div id="snap-dialog" class="modal-overlay modal-overlay-blocking" hidden>
       <div class="modal-panel">
         <div class="modal-header">
           <h2>Point snapping</h2>

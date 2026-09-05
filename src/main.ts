@@ -1,9 +1,14 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import './style.css';
 
 const viewport = document.querySelector<HTMLElement>('#viewport')!;
+const appHeader = document.querySelector<HTMLElement>('#app-header')!;
+const appFooter = document.querySelector<HTMLElement>('#app-footer')!;
 const panesEl = document.querySelector<HTMLElement>('#panes')!;
+const uploadModelBtn = document.querySelector<HTMLButtonElement>('#upload-model-btn')!;
+const uploadModelInput = document.querySelector<HTMLInputElement>('#upload-model-input')!;
 const splitViewBtn = document.querySelector<HTMLButtonElement>('#split-view-btn')!;
 const navCubeBtn = document.querySelector<HTMLButtonElement>('#nav-cube-btn')!;
 const axisGizmoBtn = document.querySelector<HTMLButtonElement>('#axis-gizmo-btn')!;
@@ -178,6 +183,67 @@ const boxEdges = new THREE.LineSegments(
   new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 }),
 );
 box.add(boxEdges);
+
+// Uploading an STL replaces whatever's currently in `content` (initially
+// just the placeholder box, later a previously uploaded model) with a mesh
+// built from the file's geometry, styled to match the placeholder so every
+// other feature (clipping, snapping, cut-edge highlighting) — all of which
+// work generically over `content`'s meshes, not the box specifically — keeps
+// working unchanged.
+function loadSTLIntoScene(geometry: THREE.BufferGeometry) {
+  if (!geometry.getAttribute('normal')) geometry.computeVertexNormals();
+
+  // STL itself has no up-axis convention, but the overwhelming convention
+  // among the CAD/slicer tools that produce them (and every common STL
+  // viewer) is Z-up; this scene, like Three.js generally, is Y-up. Without
+  // this rotation an uploaded model would render lying on its side.
+  geometry.rotateX(-Math.PI / 2);
+
+  // Centered on X/Z and dropped to sit on the grid (Y=0), matching how the
+  // placeholder box is placed.
+  geometry.computeBoundingBox();
+  const bounds = geometry.boundingBox!;
+  const center = bounds.getCenter(new THREE.Vector3());
+  geometry.translate(-center.x, -bounds.min.y, -center.z);
+
+  while (content.children.length > 0) {
+    const child = content.children[0] as THREE.Mesh;
+    content.remove(child);
+    child.traverse((node) => {
+      if (!(node instanceof THREE.Mesh) && !(node instanceof THREE.LineSegments)) return;
+      node.geometry.dispose();
+      (node.material as THREE.Material).dispose();
+    });
+  }
+
+  const mesh = new THREE.Mesh(
+    geometry,
+    new THREE.MeshStandardMaterial({ color: 0x4a9eff, metalness: 0.1, roughness: 0.6, side: THREE.DoubleSide }),
+  );
+  content.add(mesh);
+
+  const edges = new THREE.LineSegments(
+    new THREE.EdgesGeometry(geometry),
+    new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 }),
+  );
+  mesh.add(edges);
+
+  panes.forEach((pane) => {
+    pane.applyClipSelection();
+    pane.zoomToFit();
+  });
+}
+
+uploadModelBtn.addEventListener('click', () => uploadModelInput.click());
+uploadModelInput.addEventListener('change', () => {
+  const file = uploadModelInput.files?.[0];
+  uploadModelInput.value = '';
+  if (!file) return;
+  file.arrayBuffer().then((buffer) => {
+    const geometry = new STLLoader().parse(buffer);
+    loadSTLIntoScene(geometry);
+  });
+});
 
 // The boundary where a pane's selected cutting plane slices through content
 // — a "generated" edge rather than a modeled one, so it's dashed (see
@@ -1908,6 +1974,7 @@ function createPane(container: HTMLElement, seed?: PaneSeed) {
     hitTestNavCube,
     refreshClipSelectorOptions,
     applyClipSelection,
+    zoomToFit,
     hidePlacementHoverMarker: () => {
       placementHoverMarker.visible = false;
       faceHoverHighlight.visible = false;
@@ -2137,6 +2204,7 @@ function exitPlacementMode() {
 }
 
 clipPlaneBtn.addEventListener('click', () => {
+  closeSnapDialog();
   renderClipPlaneList();
   openClipPlaneDialog();
 });
@@ -2152,6 +2220,11 @@ clipPlaneCloseBtn.addEventListener('click', () => {
 // (including ones after the dialog's been closed and reopened). Shared by
 // every modal dialog (see the clip-plane and snap dialogs' calls below)
 // rather than duplicated per-dialog state/listeners.
+// How close a dragged dialog's edge needs to get to the app header's bottom
+// or the app footer's top before it snaps flush against it, like a window
+// docking to a screen edge.
+const DIALOG_EDGE_SNAP_THRESHOLD = 16;
+
 function makeDialogDraggable(panel: HTMLElement, header: HTMLElement) {
   let dragOffset: { x: number; y: number } | null = null;
 
@@ -2171,7 +2244,16 @@ function makeDialogDraggable(panel: HTMLElement, header: HTMLElement) {
     const maxLeft = Math.max(0, window.innerWidth - panel.offsetWidth);
     const maxTop = Math.max(0, window.innerHeight - panel.offsetHeight);
     const left = THREE.MathUtils.clamp(event.clientX - dragOffset.x, 0, maxLeft);
-    const top = THREE.MathUtils.clamp(event.clientY - dragOffset.y, 0, maxTop);
+    let top = THREE.MathUtils.clamp(event.clientY - dragOffset.y, 0, maxTop);
+
+    const headerBottom = appHeader.getBoundingClientRect().bottom;
+    const footerTop = appFooter.getBoundingClientRect().top;
+    if (Math.abs(top - headerBottom) < DIALOG_EDGE_SNAP_THRESHOLD) {
+      top = headerBottom;
+    } else if (Math.abs(top + panel.offsetHeight - footerTop) < DIALOG_EDGE_SNAP_THRESHOLD) {
+      top = footerTop - panel.offsetHeight;
+    }
+
     panel.style.left = `${left}px`;
     panel.style.top = `${top}px`;
   });
@@ -2185,6 +2267,7 @@ makeDialogDraggable(clipPlaneDialogPanel, clipPlaneDialogHeader);
 makeDialogDraggable(snapDialogPanel, snapDialogHeader);
 
 snapBtn.addEventListener('click', () => {
+  closeClipPlaneDialog();
   openSnapDialog();
 });
 
