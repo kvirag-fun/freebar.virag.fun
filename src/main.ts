@@ -521,7 +521,7 @@ function createSnapHighlightTexture(): THREE.Texture {
   const gap = size * 0.1; // leaves the exact point itself unobscured
 
   ctx.strokeStyle = '#14b8a6';
-  ctx.lineWidth = size * 0.045;
+  ctx.lineWidth = size * 0.0675;
   ctx.lineCap = 'round';
   ctx.beginPath();
   ctx.moveTo(c - armLength, c);
@@ -545,12 +545,11 @@ function createSnapHighlightTexture(): THREE.Texture {
 // longer needs to billboard it manually — only rescale it (see
 // MARKER_SCREEN_SCALE). Same always-on-top, own-layer treatment as
 // createDragGuideLine, and for the same reason.
-// 4.4x a unit marker's radius (the crosshair's arms reach about a third of
-// the way to the texture's own edge, so this reads as roughly the same
-// overall size the old 2.2x-radius ring did) — rescaled the same
-// distance * MARKER_SCREEN_SCALE way as the point markers in step(), so it
-// stays proportionate to a marker's own on-screen radius at any zoom.
-const SNAP_HIGHLIGHT_SCALE = 4.4;
+// 6.6x a unit marker's radius (4.4x the original crosshair size, scaled up
+// 50%) — rescaled the same distance * MARKER_SCREEN_SCALE way as the point
+// markers in step(), so it stays proportionate to a marker's own on-screen
+// radius at any zoom.
+const SNAP_HIGHLIGHT_SCALE = 6.6;
 function createSnapHighlight(): { object: THREE.Sprite; layer: number } {
   const layer = nextClipHighlightLayer++;
   const object = new THREE.Sprite(
